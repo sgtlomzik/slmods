@@ -15,7 +15,7 @@
         version: '2.0.0',
         apiBase: 'https://api.service-kp.com/v1',
         token: '1ksgubh1qkewyq3u4z65bpnwn9eshhn2',
-        protocol: 'hls4'
+        protocol: 'http'
     };
 
     // ========================================================================
