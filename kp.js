@@ -3,10 +3,10 @@
 
     var CONFIG = {
         name: 'KinoPub',
-        version: '1.0.5',
+        version: '1.0.6',
         apiBase: 'https://api.service-kp.com/v1',
         token: '1ksgubh1qkewyq3u4z65bpnwn9eshhn2',
-        protocol: 'hls',
+        protocol: 'http',
         maxQuality: 1080  // Максимальное качество для браузера
     };
 
@@ -68,7 +68,7 @@
         if (!files || !files.length) return null;
 
         var allQualities = {};
-        var protocols = ['hls', 'http', 'hls4'];
+        var protocols = ['http', 'hls', 'hls4'];
 
         // Фильтруем файлы по максимальному качеству
         var compatibleFiles = files.filter(function(file) {
