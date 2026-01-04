@@ -1,107 +1,229 @@
 /**
- * Lampa Ad Blocker - TEST VERSION
+ * Lampa Ad Blocker v2
+ * Полностью убирает рекламный блок
  */
 
 (function() {
     'use strict';
 
-    console.log('[AdBlocker] === СКРИПТ ЗАГРУЖЕН ===');
+    console.log('[AdBlocker] === ЗАГРУЖЕН v2 ===');
 
-    // Блокируем сетевые запросы
-    var originalXHR = XMLHttpRequest.prototype.open;
+    // ================================================================
+    // СПОСОБ 1: Мгновенный провал XHR запросов к рекламе
+    // ================================================================
+    
+    var originalXHROpen = XMLHttpRequest.prototype.open;
+    var originalXHRSend = XMLHttpRequest.prototype.send;
+
     XMLHttpRequest.prototype.open = function(method, url) {
-        if (typeof url === 'string') {
-            if (url.includes('betweendigital') ||
-                url.includes('yandex.ru/ads') ||
-                url.includes('adfox')) {
-                console.log('[AdBlocker] ❌ BLOCKED:', url.substring(0, 80));
-                this._blocked = true;
-            }
+        this._url = url;
+        if (typeof url === 'string' && isAdUrl(url)) {
+            console.log('[AdBlocker] ❌ BLOCKED:', url.substring(0, 60));
+            this._blocked = true;
         }
-        return originalXHR.apply(this, arguments);
+        return originalXHROpen.apply(this, arguments);
     };
 
-    var originalSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function() {
         if (this._blocked) {
-            console.log('[AdBlocker] ❌ SEND BLOCKED');
-            // Имитируем ошибку
             var self = this;
+            // Мгновенно вызываем ошибку, не ждём таймаут
             setTimeout(function() {
-                if (self.onerror) self.onerror(new Error('Blocked'));
-            }, 10);
+                self.status = 0;
+                self.readyState = 4;
+                if (self.onerror) self.onerror(new Error('Blocked by AdBlocker'));
+                if (self.onloadend) self.onloadend();
+                if (self.onreadystatechange) self.onreadystatechange();
+            }, 1);
             return;
         }
-        return originalSend.apply(this, arguments);
+        return originalXHRSend.apply(this, arguments);
     };
 
-    function hookPlayer() {
-        if (!Lampa || !Lampa.Player || !Lampa.Player.play) {
-            console.log('[AdBlocker] ⚠️ Lampa.Player не найден');
-            return false;
+    function isAdUrl(url) {
+        return url.includes('betweendigital') ||
+               url.includes('yandex.ru/ads') ||
+               url.includes('adfox') ||
+               url.includes('/vast') ||
+               url.includes('vast.') ||
+               url.includes('ads.');
+    }
+
+    // ================================================================
+    // СПОСОБ 2: Перехват рекламного модуля Lampa
+    // ================================================================
+
+    function patchAdModule() {
+        if (!window.Lampa) return;
+
+        // Патчим функцию показа рекламы
+        if (Lampa.Ad && !Lampa.Ad._patched) {
+            var originalAd = Lampa.Ad;
+            
+            Lampa.Ad = function(params) {
+                console.log('[AdBlocker] 🚫 Ad конструктор перехвачен');
+                
+                return {
+                    start: function() {
+                        console.log('[AdBlocker] 🚫 Ad.start() → пропуск');
+                        if (params && params.onComplete) params.onComplete();
+                        return this;
+                    },
+                    destroy: function() {},
+                    launch: function() {
+                        console.log('[AdBlocker] 🚫 Ad.launch() → пропуск');
+                        if (params && params.onComplete) params.onComplete();
+                    }
+                };
+            };
+            
+            Lampa.Ad._patched = true;
+            console.log('[AdBlocker] ✅ Lampa.Ad пропатчен');
         }
 
-        if (Lampa.Player._adblock_hooked) {
-            console.log('[AdBlocker] ⚠️ Уже подключен');
-            return true;
+        // Очищаем список рекламы в хранилище
+        if (Lampa.Storage) {
+            var adKeys = ['vast_list', 'ad_list', 'preroll', 'vast_prerolls'];
+            adKeys.forEach(function(key) {
+                try {
+                    Lampa.Storage.set(key, []);
+                    Lampa.Storage.set(key, null);
+                } catch(e) {}
+            });
         }
+    }
+
+    // ================================================================
+    // СПОСОБ 3: Перехват Player.play - убираем рекламные данные
+    // ================================================================
+
+    function patchPlayer() {
+        if (!Lampa || !Lampa.Player) return;
+        if (Lampa.Player._adblock_patched) return;
 
         var originalPlay = Lampa.Player.play;
 
         Lampa.Player.play = function(element) {
-            console.log('[AdBlocker] 🎬 Player.play вызван');
-            console.log('[AdBlocker] vast_url:', element ? element.vast_url : 'нет element');
+            console.log('[AdBlocker] 🎬 Player.play');
             
             if (element) {
-                if (element.vast_url) {
-                    console.log('[AdBlocker] ✅ Удаляю vast_url');
-                    delete element.vast_url;
-                }
+                // Удаляем ВСЕ рекламные поля
+                delete element.vast;
+                delete element.vast_url;
                 delete element.vast_msg;
                 delete element.vast_region;
                 delete element.vast_platform;
                 delete element.vast_screen;
+                delete element.preroll;
+                delete element.advert;
+                delete element.ad;
+                
+                // Явно говорим что рекламы нет
+                element.noAd = true;
             }
 
             return originalPlay.call(this, element);
         };
 
-        Lampa.Player._adblock_hooked = true;
-        console.log('[AdBlocker] ✅ Player.play перехвачен');
-        return true;
+        Lampa.Player._adblock_patched = true;
+        console.log('[AdBlocker] ✅ Player.play пропатчен');
     }
 
-    function init() {
-        console.log('[AdBlocker] init(), window.Lampa =', !!window.Lampa);
-        
-        if (window.Lampa) {
-            hookPlayer();
-            
-            // Следим за рекламой
-            if (Lampa.Listener) {
-                Lampa.Listener.follow('full', function(e) {
-                    console.log('[AdBlocker] EVENT full:', e.type);
-                });
-                
-                Lampa.Listener.follow('app', function(e) {
-                    console.log('[AdBlocker] EVENT app:', e.type);
-                    if (e.type === 'ready') {
-                        hookPlayer();
-                    }
-                });
+    // ================================================================
+    // СПОСОБ 4: Перехват события показа рекламы
+    // ================================================================
+
+    function patchListener() {
+        if (!Lampa || !Lampa.Listener) return;
+        if (Lampa.Listener._adblock_patched) return;
+
+        var originalFollow = Lampa.Listener.follow;
+
+        Lampa.Listener.follow = function(name, callback) {
+            if (name === 'ad' || name === 'vast' || name === 'preroll') {
+                console.log('[AdBlocker] 🚫 Listener для', name, 'заблокирован');
+                return;
             }
+            return originalFollow.apply(this, arguments);
+        };
+
+        Lampa.Listener._adblock_patched = true;
+    }
+
+    // ================================================================
+    // СПОСОБ 5: Подмена функции показа рекламного блока
+    // ================================================================
+
+    function patchAdShow() {
+        // Ищем и патчим функции связанные с рекламой
+        if (window.Lampa) {
+            // Пробуем найти Ad модуль через разные пути
+            var paths = ['Lampa.Ad', 'Lampa.Ads', 'Lampa.Vast', 'Lampa.Preroll'];
+            
+            paths.forEach(function(path) {
+                try {
+                    var obj = eval(path);
+                    if (obj && obj.show) {
+                        var original = obj.show;
+                        obj.show = function() {
+                            console.log('[AdBlocker] 🚫', path, '.show() заблокирован');
+                            return Promise.resolve();
+                        };
+                    }
+                    if (obj && obj.launch) {
+                        obj.launch = function() {
+                            console.log('[AdBlocker] 🚫', path, '.launch() заблокирован');
+                        };
+                    }
+                } catch(e) {}
+            });
         }
     }
 
+    // ================================================================
+    // ЗАПУСК
+    // ================================================================
+
+    function applyAllPatches() {
+        console.log('[AdBlocker] Применяю патчи...');
+        patchAdModule();
+        patchPlayer();
+        patchListener();
+        patchAdShow();
+    }
+
     // Запуск сразу
-    init();
+    if (window.Lampa) {
+        applyAllPatches();
+    }
 
-    // И с задержкой
-    setTimeout(init, 500);
-    setTimeout(init, 1000);
-    setTimeout(init, 2000);
+    // И с задержками
+    setTimeout(applyAllPatches, 0);
+    setTimeout(applyAllPatches, 100);
+    setTimeout(applyAllPatches, 500);
+    setTimeout(applyAllPatches, 1000);
 
-    // При загрузке DOM
-    document.addEventListener('DOMContentLoaded', init);
+    // При готовности приложения
+    document.addEventListener('DOMContentLoaded', applyAllPatches);
+
+    if (window.Lampa && Lampa.Listener) {
+        Lampa.Listener.follow('app', function(e) {
+            if (e.type === 'ready') {
+                applyAllPatches();
+            }
+        });
+    }
+
+    // Отслеживаем создание Lampa
+    var checkLampa = setInterval(function() {
+        if (window.Lampa) {
+            applyAllPatches();
+            clearInterval(checkLampa);
+        }
+    }, 50);
+
+    setTimeout(function() {
+        clearInterval(checkLampa);
+    }, 10000);
 
 })();
