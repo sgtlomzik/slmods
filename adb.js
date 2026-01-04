@@ -1,154 +1,263 @@
 /**
- * Lampa Ad Blocker v3
- * Блокирует рекламу на уровне логики, не по доменам
+ * Lampa Ad Blocker v4
+ * Исправлены ложные срабатывания + блокировка UI рекламы
  */
 
 (function() {
     'use strict';
 
-    console.log('[AdBlocker] === ЗАГРУЖЕН v3 ===');
+    // === НАСТРОЙКИ ===
+    var DEBUG = false; // Поставь true для отладки
+    
+    function log() {
+        if (DEBUG) console.log.apply(console, ['[AdBlocker]'].concat(Array.prototype.slice.call(arguments)));
+    }
 
+    // ============================================================
+    // CSS: Скрываем надпись "РЕКЛАМА" и оверлеи
+    // ============================================================
+    function injectCSS() {
+        if (document.getElementById('adblocker-css')) return;
+        
+        var style = document.createElement('style');
+        style.id = 'adblocker-css';
+        style.textContent = `
+            /* Скрываем все элементы рекламного UI */
+            .ad-notify,
+            .player-video__ad,
+            .player__advert,
+            .player-video__advert,
+            .vast-block,
+            .preroll-notify,
+            [class*="ad-overlay"],
+            [class*="vast-"],
+            [class*="preroll"] {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+            }
+        `;
+        
+        document.head.appendChild(style);
+        log('✅ CSS injected');
+    }
+
+    // ============================================================
+    // MutationObserver: Удаляем рекламные элементы динамически
+    // ============================================================
+    function setupObserver() {
+        if (window._adObserver) return;
+        
+        window._adObserver = new MutationObserver(function(mutations) {
+            mutations.forEach(function(m) {
+                m.addedNodes.forEach(function(node) {
+                    if (node.nodeType === 1) { // Element
+                        var cl = node.className || '';
+                        if (typeof cl === 'string' && (
+                            cl.indexOf('ad-notify') !== -1 ||
+                            cl.indexOf('vast') !== -1 ||
+                            cl.indexOf('preroll') !== -1 ||
+                            cl.indexOf('advert') !== -1
+                        )) {
+                            node.remove();
+                            log('🗑️ Removed ad element:', cl);
+                        }
+                    }
+                });
+            });
+        });
+        
+        window._adObserver.observe(document.body || document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    // ============================================================
+    // ПАТЧИ
+    // ============================================================
     function applyPatches() {
         if (!window.Lampa) return;
 
-        // ============================================================
-        // ГЛАВНЫЙ ПАТЧ: Подменяем данные о рекламе на пустые
-        // ============================================================
-        
-        // Патч 1: Перехватываем Player.play
+        injectCSS();
+        if (document.body) setupObserver();
+
+        // ----------------------------------------------------------
+        // Патч 1: Storage.get — ТОЧНАЯ проверка ключей (не includes!)
+        // ----------------------------------------------------------
+        if (Lampa.Storage && !Lampa.Storage._adblocked) {
+            var originalGet = Lampa.Storage.get;
+            
+            Lampa.Storage.get = function(name, defaultValue) {
+                if (name && typeof name === 'string') {
+                    // Только точные рекламные ключи
+                    var isAdKey = /^(vast|preroll|ad_|ads$|advert)/.test(name) ||
+                                  name.indexOf('vast_') === 0;
+                    
+                    if (isAdKey) {
+                        log('🚫 Storage.get blocked:', name);
+                        return defaultValue !== undefined ? defaultValue : null;
+                    }
+                }
+                return originalGet.apply(this, arguments);
+            };
+            
+            Lampa.Storage._adblocked = true;
+        }
+
+        // ----------------------------------------------------------
+        // Патч 2: Player.play
+        // ----------------------------------------------------------
         if (Lampa.Player && Lampa.Player.play && !Lampa.Player._adblocked) {
             var originalPlay = Lampa.Player.play;
             
             Lampa.Player.play = function(element) {
                 if (element) {
-                    // Убиваем все рекламные поля
-                    element.vast = null;
-                    element.vast_url = null;
-                    element.vast_msg = null;
-                    element.vast_region = null;
-                    element.vast_platform = null;
-                    element.vast_screen = null;
+                    delete element.vast;
+                    delete element.vast_url;
+                    delete element.vast_msg;
+                    delete element.preroll;
+                    delete element.advert;
                 }
-                console.log('[AdBlocker] ✅ Player.play без рекламы');
+                log('✅ Player.play clean');
                 return originalPlay.call(this, element);
             };
             
             Lampa.Player._adblocked = true;
         }
 
-        // Патч 2: Очищаем список прероллов в Storage
-        if (Lampa.Storage) {
-            // Перехватываем получение рекламных данных
-            var originalGet = Lampa.Storage.get;
+        // ----------------------------------------------------------
+        // Патч 3: Перехват Listener событий рекламы
+        // ----------------------------------------------------------
+        if (Lampa.Listener && !Lampa.Listener._adSend) {
+            var originalSend = Lampa.Listener.send;
             
-            if (!Lampa.Storage._adblocked) {
-                Lampa.Storage.get = function(name, defaultValue) {
-                    // Если запрашивают рекламу — возвращаем пустоту
-                    if (name && (
-                        name.includes('vast') || 
-                        name.includes('preroll') || 
-                        name.includes('ad_')
-                    )) {
-                        console.log('[AdBlocker] 🚫 Storage.get blocked:', name);
-                        return defaultValue || [];
+            Lampa.Listener.send = function(type, data) {
+                // Блокируем отправку рекламных событий
+                if (type && typeof type === 'string') {
+                    if (type.indexOf('ad') === 0 || type === 'vast' || type === 'preroll') {
+                        log('🚫 Listener.send blocked:', type);
+                        return;
                     }
-                    return originalGet.apply(this, arguments);
-                };
-                
-                Lampa.Storage._adblocked = true;
-            }
-        }
-
-        // Патч 3: Перехватываем глобальный объект рекламы
-        if (Lampa.Ad && !Lampa.Ad._adblocked) {
-            // Сохраняем оригинал
-            var OriginalAd = Lampa.Ad;
-            
-            // Заменяем на заглушку
-            Lampa.Ad = function() {
-                console.log('[AdBlocker] 🚫 new Lampa.Ad() → заглушка');
-                
-                return {
-                    start: function(callback) {
-                        console.log('[AdBlocker] ✅ Ad.start() → сразу callback');
-                        if (callback) setTimeout(callback, 0);
-                        return this;
-                    },
-                    destroy: function() { return this; },
-                    launch: function(callback) {
-                        if (callback) setTimeout(callback, 0);
-                        return this;
-                    },
-                    ended: function() { return this; }
-                };
-            };
-            
-            // Копируем статические методы если есть
-            for (var key in OriginalAd) {
-                if (OriginalAd.hasOwnProperty(key)) {
-                    Lampa.Ad[key] = function() {
-                        console.log('[AdBlocker] 🚫 Lampa.Ad.' + key + '() blocked');
-                        return null;
-                    };
                 }
-            }
-            
-            Lampa.Ad._adblocked = true;
-        }
-
-        // Патч 4: Если есть отдельный Vast модуль
-        if (Lampa.Vast && !Lampa.Vast._adblocked) {
-            Lampa.Vast = function() {
-                return {
-                    load: function(callback) {
-                        if (callback) setTimeout(function() { callback(null); }, 0);
-                    },
-                    show: function(callback) {
-                        if (callback) setTimeout(callback, 0);
-                    },
-                    destroy: function() {}
-                };
+                return originalSend.apply(this, arguments);
             };
-            Lampa.Vast._adblocked = true;
+            
+            Lampa.Listener._adSend = true;
         }
 
-        console.log('[AdBlocker] ✅ Все патчи применены');
+        // ----------------------------------------------------------
+        // Патч 4: Блокируем создание Ad/Vast модулей
+        // ----------------------------------------------------------
+        ['Ad', 'Vast', 'Preroll', 'Advert'].forEach(function(name) {
+            if (Lampa[name] && !Lampa[name]._blocked) {
+                Lampa[name] = function() {
+                    log('🚫 new Lampa.' + name + '() blocked');
+                    return {
+                        start: function(cb) { cb && setTimeout(cb, 0); return this; },
+                        launch: function(cb) { cb && setTimeout(cb, 0); return this; },
+                        show: function(cb) { cb && setTimeout(cb, 0); return this; },
+                        run: function(cb) { cb && setTimeout(cb, 0); return this; },
+                        destroy: function() { return this; },
+                        ended: function() { return this; },
+                        load: function(cb) { cb && setTimeout(function(){ cb(null); }, 0); return this; }
+                    };
+                };
+                Lampa[name]._blocked = true;
+            }
+        });
+
+        // ----------------------------------------------------------
+        // Патч 5: Перехват fetch/XHR для блокировки VAST запросов
+        // ----------------------------------------------------------
+        if (!window._fetchAdBlocked && window.fetch) {
+            var originalFetch = window.fetch;
+            
+            window.fetch = function(url, options) {
+                if (url && typeof url === 'string') {
+                    if (/ads\.|\/vast|betweendigital|adfox|yandex.*\/ads/i.test(url)) {
+                        log('🚫 fetch blocked:', url.substring(0, 60));
+                        return Promise.resolve(new Response('', { status: 200 }));
+                    }
+                }
+                return originalFetch.apply(this, arguments);
+            };
+            
+            window._fetchAdBlocked = true;
+        }
+
+        if (!window._xhrAdBlocked) {
+            var originalOpen = XMLHttpRequest.prototype.open;
+            var originalSend = XMLHttpRequest.prototype.send;
+            
+            XMLHttpRequest.prototype.open = function(method, url) {
+                this._url = url;
+                return originalOpen.apply(this, arguments);
+            };
+            
+            XMLHttpRequest.prototype.send = function() {
+                if (this._url && typeof this._url === 'string') {
+                    if (/ads\.|\/vast|betweendigital|adfox|yandex.*\/ads/i.test(this._url)) {
+                        log('🚫 XHR blocked:', this._url.substring(0, 60));
+                        
+                        // Имитируем ошибку чтобы Ad модуль быстро перешёл к следующему
+                        var self = this;
+                        setTimeout(function() {
+                            if (self.onerror) self.onerror(new Error('blocked'));
+                            if (self.onloadend) self.onloadend();
+                        }, 0);
+                        return;
+                    }
+                }
+                return originalSend.apply(this, arguments);
+            };
+            
+            window._xhrAdBlocked = true;
+        }
+
+        log('✅ Patches applied');
     }
 
     // ============================================================
-    // ЗАПУСК В РАЗНЫЕ МОМЕНТЫ
+    // ЗАПУСК
     // ============================================================
-
+    
     // Сразу
     applyPatches();
+    injectCSS();
 
-    // С задержками (на случай если Lampa загрузится позже)
-    [0, 50, 100, 200, 500, 1000, 2000].forEach(function(delay) {
-        setTimeout(applyPatches, delay);
-    });
+    // DOM ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+            applyPatches();
+            setupObserver();
+        });
+    } else {
+        setupObserver();
+    }
 
-    // При загрузке DOM
-    document.addEventListener('DOMContentLoaded', applyPatches);
-
-    // При готовности Lampa
-    var waitForLampa = setInterval(function() {
+    // Ждём Lampa
+    var attempts = 0;
+    var waitInterval = setInterval(function() {
+        attempts++;
+        
         if (window.Lampa) {
             applyPatches();
             
-            if (Lampa.Listener) {
+            if (Lampa.Listener && !Lampa.Listener._adAppReady) {
                 Lampa.Listener.follow('app', function(e) {
-                    if (e.type === 'ready') {
-                        applyPatches();
-                    }
+                    if (e.type === 'ready') applyPatches();
                 });
-                clearInterval(waitForLampa);
+                Lampa.Listener._adAppReady = true;
             }
         }
-    }, 50);
-
-    // Остановить проверку через 10 сек
-    setTimeout(function() {
-        clearInterval(waitForLampa);
-    }, 10000);
+        
+        // Останавливаемся после успеха или таймаута
+        if (attempts > 50 || (Lampa && Lampa.Storage && Lampa.Storage._adblocked)) {
+            clearInterval(waitInterval);
+            log('✅ Init complete, attempts:', attempts);
+        }
+    }, 100);
 
 })();
