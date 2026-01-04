@@ -1,21 +1,17 @@
 /**
  * KinoPub Balancer for Lampa
- * Версия: 2.0.0
+ * Версия: 2.1.0
  */
 
 (function() {
     'use strict';
 
-    // ========================================================================
-    // КОНФИГУРАЦИЯ
-    // ========================================================================
-    
     var CONFIG = {
         name: 'KinoPub',
-        version: '2.0.0',
+        version: '2.1.0',
         apiBase: 'https://api.service-kp.com/v1',
         token: '1ksgubh1qkewyq3u4z65bpnwn9eshhn2',
-        protocol: 'http'
+        protocol: 'hls4'
     };
 
     // ========================================================================
@@ -104,7 +100,6 @@
     function buildFileList(item) {
         var files = [];
 
-        // Фильмы
         if (item.videos && item.videos.length) {
             item.videos.forEach(function(video) {
                 var extracted = extractVideoUrl(video.files);
@@ -126,7 +121,6 @@
             });
         }
 
-        // Сериалы
         if (item.seasons && item.seasons.length) {
             item.seasons.forEach(function(season) {
                 (season.episodes || []).forEach(function(episode) {
@@ -170,7 +164,7 @@
     
     function KinoPubComponent(object) {
         var network = new Lampa.Reguest();
-        var scroll = new Lampa.Scroll({ mask: true, over: true });
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var files = new Lampa.Explorer(object);
         var filter = new Lampa.Filter(object);
 
@@ -180,9 +174,12 @@
         var filterData = { season: [] };
         var currentSeason = 0;
         var kinopubItem = null;
+        var searchQueries = [];
+        var currentQueryIndex = 0;
 
         files.appendFiles(scroll.render());
         files.appendHead(filter.render());
+        scroll.minus(files.render().find('.explorer__files-head'));
 
         // ====================================================================
         // ИНИЦИАЛИЗАЦИЯ
@@ -192,36 +189,88 @@
             var self = this;
             this.loading(true);
 
-            var movie = object.movie;
-            var query = movie.title || movie.name || movie.original_title || movie.original_name;
+            // Собираем варианты поисковых запросов
+            searchQueries = this.buildSearchQueries(object.movie);
+            currentQueryIndex = 0;
+
+            this.tryNextSearch();
+        };
+
+        this.buildSearchQueries = function(movie) {
+            var queries = [];
+            var seen = {};
+
+            function add(q) {
+                if (!q) return;
+                q = q.trim();
+                if (q && !seen[q.toLowerCase()]) {
+                    seen[q.toLowerCase()] = true;
+                    queries.push(q);
+                }
+            }
+
+            // Полное название
+            add(movie.title);
+            add(movie.name);
+
+            // Оригинальное название
+            add(movie.original_title);
+            add(movie.original_name);
+
+            // Без года в скобках
+            var titleClean = (movie.title || movie.name || '').replace(/\s*\(\d{4}\)\s*$/, '');
+            add(titleClean);
+
+            // Первые 2-3 слова
+            var words = (movie.title || movie.name || '').split(/\s+/);
+            if (words.length > 2) {
+                add(words.slice(0, 2).join(' '));
+                add(words.slice(0, 3).join(' '));
+            }
+
+            return queries;
+        };
+
+        this.tryNextSearch = function() {
+            var self = this;
+
+            if (currentQueryIndex >= searchQueries.length) {
+                this.showMessage('Ничего не найдено', 'Попробуйте изменить название');
+                return;
+            }
+
+            var query = searchQueries[currentQueryIndex];
+            currentQueryIndex++;
 
             searchContent(query).then(function(response) {
-                if (response && response.items && response.items.length) {
-                    var items = response.items;
-                    var found = self.findBestMatch(items, movie);
-
-                    if (found) {
-                        // Точное совпадение — сразу загружаем и воспроизводим
-                        self.loadAndPlay(found.id);
-                    } else if (items.length === 1) {
-                        // Один результат — сразу воспроизводим
-                        self.loadAndPlay(items[0].id);
-                    } else {
-                        // Несколько результатов — показываем выбор
-                        self.showSearchResults(items);
-                    }
+                if (response && response.items && response.items.length > 0) {
+                    self.handleSearchResults(response.items);
                 } else {
-                    self.showMessage('Ничего не найдено', 'Поиск: ' + query);
+                    // Пробуем следующий запрос
+                    self.tryNextSearch();
                 }
             }).catch(function(err) {
                 self.showMessage('Ошибка поиска', err.message || '');
             });
         };
 
-        // ====================================================================
-        // ПОИСК И ЗАГРУЗКА
-        // ====================================================================
-        
+        this.handleSearchResults = function(items) {
+            var self = this;
+            var movie = object.movie;
+
+            // Если один результат и это точное совпадение — сразу воспроизводим
+            if (items.length === 1) {
+                var found = this.findBestMatch(items, movie);
+                if (found) {
+                    this.loadAndPlay(found.id);
+                    return;
+                }
+            }
+
+            // Несколько результатов — всегда показываем список для выбора
+            this.showSearchResults(items);
+        };
+
         this.findBestMatch = function(items, movie) {
             var year = parseInt((movie.release_date || movie.first_air_date || '0').substring(0, 4));
             var title = (movie.title || movie.name || '').toLowerCase().trim();
@@ -229,7 +278,6 @@
 
             return items.find(function(item) {
                 var itemTitle = (item.title || '').toLowerCase();
-                // Убираем часть после " / " для сравнения
                 var itemTitleClean = itemTitle.split(' / ')[0].trim();
                 var itemYear = item.year;
 
@@ -243,6 +291,10 @@
             });
         };
 
+        // ====================================================================
+        // ЗАГРУЗКА И ВОСПРОИЗВЕДЕНИЕ
+        // ====================================================================
+
         this.loadAndPlay = function(id) {
             var self = this;
 
@@ -251,11 +303,10 @@
                     kinopubItem = response.item;
                     videoFiles = buildFileList(response.item);
 
+                    // Фильм с одним видео — сразу воспроизводим
                     if (videoFiles.length === 1 && !response.item.seasons) {
-                        // Один файл (фильм) — сразу воспроизводим
                         self.play(videoFiles[0], videoFiles);
                     } else if (videoFiles.length > 0) {
-                        // Несколько файлов (сериал или несколько версий) — показываем список
                         self.buildFilters();
                         self.display();
                     } else {
@@ -300,6 +351,7 @@
         this.showSearchResults = function(items) {
             var self = this;
             scroll.clear();
+            scroll.reset();
 
             items.forEach(function(item) {
                 var html = self.createSearchCard(item);
@@ -325,7 +377,6 @@
 
             var html = $('<div class="kinopub-card selector"></div>');
             
-            // Постер
             var imgBox = $('<div class="kinopub-card__img"></div>');
             if (poster) {
                 var img = $('<img />');
@@ -339,7 +390,6 @@
             }
             html.append(imgBox);
 
-            // Контент
             var body = $('<div class="kinopub-card__body"></div>');
             body.append('<div class="kinopub-card__title">' + item.title + '</div>');
             body.append('<div class="kinopub-card__info">' + year + ' • ' + type + '</div>');
@@ -351,6 +401,7 @@
         this.display = function() {
             var self = this;
             scroll.clear();
+            scroll.reset();
 
             var filtered = videoFiles;
             if (currentSeason && filterData.season.length) {
@@ -385,7 +436,6 @@
 
             var html = $('<div class="kinopub-card selector"></div>');
             
-            // Постер / Превью
             var imgBox = $('<div class="kinopub-card__img"></div>');
             if (file.poster) {
                 var img = $('<img />');
@@ -398,20 +448,15 @@
                 imgBox.addClass('kinopub-card__img--empty');
             }
             
-            // Номер эпизода поверх картинки
             if (file.episode) {
                 imgBox.append('<div class="kinopub-card__episode">' + file.episode + '</div>');
             }
             
             html.append(imgBox);
 
-            // Контент
             var body = $('<div class="kinopub-card__body"></div>');
-            
-            // Заголовок
             body.append('<div class="kinopub-card__title">' + title + '</div>');
             
-            // Информация
             var infoItems = [];
             if (file.voice) infoItems.push(file.voice);
             if (file.year && !file.season) infoItems.push(file.year);
@@ -422,7 +467,6 @@
             
             html.append(body);
 
-            // Правая часть (время и качество)
             var meta = $('<div class="kinopub-card__meta"></div>');
             if (file.duration) {
                 meta.append('<div class="kinopub-card__time">' + file.duration + '</div>');
@@ -603,39 +647,32 @@
     
     function addStyles() {
         var css = [
-            // Карточка
             '.kinopub-card {',
             '    display: flex;',
             '    align-items: center;',
-            '    padding: 1em;',
-            '    margin-bottom: 0.5em;',
+            '    padding: 0.8em;',
+            '    margin: 0 1.5em 0.5em 1.5em;',
             '    background: rgba(0,0,0,0.3);',
-            '    border-radius: 0.5em;',
+            '    border-radius: 0.4em;',
             '    position: relative;',
-            '    transition: background 0.2s;',
-            '}',
-            '.kinopub-card.focus {',
-            '    background: rgba(255,255,255,0.1);',
             '}',
             '.kinopub-card.focus::before {',
             '    content: "";',
             '    position: absolute;',
-            '    top: -0.3em;',
-            '    left: -0.3em;',
-            '    right: -0.3em;',
-            '    bottom: -0.3em;',
-            '    border: 0.2em solid #fff;',
-            '    border-radius: 0.7em;',
+            '    top: -0.2em;',
+            '    left: -0.2em;',
+            '    right: -0.2em;',
+            '    bottom: -0.2em;',
+            '    border: 0.15em solid #fff;',
+            '    border-radius: 0.5em;',
             '    pointer-events: none;',
             '}',
-
-            // Изображение
             '.kinopub-card__img {',
-            '    width: 8em;',
-            '    height: 5em;',
+            '    width: 7em;',
+            '    height: 4em;',
             '    flex-shrink: 0;',
-            '    margin-right: 1.2em;',
-            '    border-radius: 0.4em;',
+            '    margin-right: 1em;',
+            '    border-radius: 0.3em;',
             '    overflow: hidden;',
             '    background: rgba(255,255,255,0.1);',
             '    position: relative;',
@@ -645,79 +682,70 @@
             '    height: 100%;',
             '    object-fit: cover;',
             '}',
-            '.kinopub-card__img--empty {',
-            '    display: flex;',
-            '    align-items: center;',
-            '    justify-content: center;',
-            '}',
             '.kinopub-card__img--empty::after {',
             '    content: "🎬";',
-            '    font-size: 2em;',
-            '    opacity: 0.5;',
-            '}',
-
-            // Номер эпизода
-            '.kinopub-card__episode {',
             '    position: absolute;',
             '    top: 50%;',
             '    left: 50%;',
             '    transform: translate(-50%, -50%);',
             '    font-size: 1.5em;',
-            '    font-weight: bold;',
-            '    text-shadow: 0 0 0.5em rgba(0,0,0,0.8);',
+            '    opacity: 0.5;',
             '}',
-
-            // Тело карточки
+            '.kinopub-card__episode {',
+            '    position: absolute;',
+            '    top: 50%;',
+            '    left: 50%;',
+            '    transform: translate(-50%, -50%);',
+            '    font-size: 1.3em;',
+            '    font-weight: bold;',
+            '    text-shadow: 0 0 0.3em rgba(0,0,0,0.9);',
+            '}',
             '.kinopub-card__body {',
             '    flex-grow: 1;',
             '    min-width: 0;',
+            '    overflow: hidden;',
             '}',
             '.kinopub-card__title {',
-            '    font-size: 1.2em;',
-            '    font-weight: 500;',
-            '    margin-bottom: 0.3em;',
+            '    font-size: 1.1em;',
             '    white-space: nowrap;',
             '    overflow: hidden;',
             '    text-overflow: ellipsis;',
             '}',
             '.kinopub-card__info {',
-            '    font-size: 0.9em;',
-            '    color: rgba(255,255,255,0.6);',
+            '    font-size: 0.85em;',
+            '    color: rgba(255,255,255,0.5);',
+            '    margin-top: 0.2em;',
             '    white-space: nowrap;',
             '    overflow: hidden;',
             '    text-overflow: ellipsis;',
             '}',
-
-            // Мета (справа)
             '.kinopub-card__meta {',
             '    flex-shrink: 0;',
             '    text-align: right;',
-            '    margin-left: 1em;',
+            '    margin-left: 0.8em;',
             '}',
             '.kinopub-card__time {',
-            '    font-size: 1em;',
-            '    margin-bottom: 0.3em;',
+            '    font-size: 0.9em;',
+            '    margin-bottom: 0.2em;',
             '}',
             '.kinopub-card__quality {',
             '    display: inline-block;',
-            '    padding: 0.2em 0.5em;',
+            '    padding: 0.15em 0.4em;',
             '    background: rgba(255,255,255,0.15);',
-            '    border-radius: 0.3em;',
-            '    font-size: 0.85em;',
+            '    border-radius: 0.2em;',
+            '    font-size: 0.8em;',
             '}',
-
-            // Пустое сообщение
             '.kinopub-empty {',
-            '    padding: 3em;',
+            '    padding: 2em;',
             '    text-align: center;',
             '}',
             '.kinopub-empty__title {',
-            '    font-size: 1.5em;',
-            '    margin-bottom: 0.5em;',
+            '    font-size: 1.3em;',
+            '    margin-bottom: 0.3em;',
             '}',
             '.kinopub-empty__subtitle {',
-            '    font-size: 1em;',
-            '    color: rgba(255,255,255,0.6);',
+            '    font-size: 0.9em;',
+            '    color: rgba(255,255,255,0.5);',
             '}'
         ].join('\n');
 
@@ -745,7 +773,6 @@
             description: 'KinoPub'
         };
 
-        // Кнопка на карточке фильма
         Lampa.Listener.follow('full', function(e) {
             if (e.type === 'complite') {
                 var render = e.object.activity.render();
@@ -770,7 +797,6 @@
         });
     }
 
-    // Ждём готовности Lampa
     if (window.appready) {
         startPlugin();
     } else {
