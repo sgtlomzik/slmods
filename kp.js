@@ -1,14 +1,9 @@
-/**
- * KinoPub Balancer for Lampa
- * Версия: 1.0.0
- */
-
 (function() {
     'use strict';
 
     var CONFIG = {
         name: 'KinoPub',
-        version: '1.0.0',
+        version: '1.0.1',
         apiBase: 'https://api.service-kp.com/v1',
         token: '1ksgubh1qkewyq3u4z65bpnwn9eshhn2',
         protocol: 'hls4',
@@ -40,14 +35,18 @@
                 url += '?' + query;
             }
 
+            console.log('KinoPub API Request:', url);
+
             var network = new Lampa.Reguest();
 
             network.native(url, function(response) {
+                console.log('KinoPub API Response:', response);
                 if (typeof response === 'string') {
                     try { response = JSON.parse(response); } catch(e) {}
                 }
                 resolve(response);
             }, function(err) {
+                console.log('KinoPub API Error:', err);
                 reject(err);
             }, false, {
                 headers: { 'Authorization': 'Bearer ' + token },
@@ -93,11 +92,14 @@
     }
 
     function buildFileList(item) {
+        console.log('KinoPub buildFileList:', item);
         var files = [];
 
         if (item.videos && item.videos.length) {
+            console.log('KinoPub: Found videos:', item.videos.length);
             item.videos.forEach(function(video) {
                 var extracted = extractVideoUrl(video.files);
+                console.log('KinoPub: Extracted video:', extracted);
                 if (!extracted) return;
 
                 files.push({
@@ -115,6 +117,7 @@
         }
 
         if (item.seasons && item.seasons.length) {
+            console.log('KinoPub: Found seasons:', item.seasons.length);
             item.seasons.forEach(function(season) {
                 (season.episodes || []).forEach(function(episode) {
                     var extracted = extractVideoUrl(episode.files);
@@ -137,6 +140,7 @@
             });
         }
 
+        console.log('KinoPub: Total files:', files.length);
         return files;
     }
 
@@ -153,6 +157,7 @@
         var currentSeason = 0;
 
         this.initialize = function() {
+            console.log('KinoPub: Initialize');
             this.loading(true);
             this.search();
         };
@@ -162,18 +167,26 @@
             var movie = object.movie;
             var query = movie.title || movie.name || movie.original_title || movie.original_name;
 
+            console.log('KinoPub: Searching for:', query);
+
             searchContent(query).then(function(response) {
+                console.log('KinoPub: Search response:', response);
                 if (response && response.items && response.items.length) {
+                    console.log('KinoPub: Found items:', response.items.length);
                     var found = self.findBestMatch(response.items, movie);
                     if (found) {
+                        console.log('KinoPub: Best match:', found);
                         self.loadItem(found.id);
                     } else {
+                        console.log('KinoPub: No exact match, showing results');
                         self.showSearchResults(response.items);
                     }
                 } else {
+                    console.log('KinoPub: No results');
                     self.showMessage('Ничего не найдено', 'Поиск: ' + query);
                 }
             }).catch(function(err) {
+                console.log('KinoPub: Search error:', err);
                 self.showMessage('Ошибка поиска', err.message || '');
             });
         };
@@ -194,6 +207,7 @@
 
         this.showSearchResults = function(items) {
             var self = this;
+            console.log('KinoPub: showSearchResults', items.length);
             scroll.clear();
 
             items.slice(0, 10).forEach(function(item) {
@@ -217,9 +231,11 @@
 
         this.loadItem = function(id) {
             var self = this;
+            console.log('KinoPub: loadItem', id);
             scroll.clear();
 
             getItem(id).then(function(response) {
+                console.log('KinoPub: Item response:', response);
                 if (response && response.item) {
                     videoFiles = buildFileList(response.item);
                     if (videoFiles.length) {
@@ -232,6 +248,7 @@
                     self.showMessage('Контент не найден', '');
                 }
             }).catch(function(err) {
+                console.log('KinoPub: Load error:', err);
                 self.showMessage('Ошибка загрузки', err.message || '');
             });
         };
@@ -256,6 +273,7 @@
 
         this.display = function() {
             var self = this;
+            console.log('KinoPub: display, files:', videoFiles.length);
             scroll.clear();
 
             var filtered = videoFiles;
@@ -264,6 +282,8 @@
                     return f.season === currentSeason;
                 });
             }
+
+            console.log('KinoPub: filtered files:', filtered.length);
 
             filtered.forEach(function(file) {
                 var title = file.title;
@@ -291,6 +311,7 @@
         };
 
         this.play = function(file, playlist) {
+            console.log('KinoPub: play', file);
             var lampaPlaylist = playlist.map(function(f) {
                 var title = f.title;
                 if (f.season && f.episode) {
@@ -340,6 +361,7 @@
         };
 
         this.showMessage = function(title, subtitle) {
+            console.log('KinoPub: showMessage', title, subtitle);
             scroll.clear();
             var html = $('<div class="online-empty"></div>');
             html.append('<div class="online-empty__title">' + title + '</div>');
@@ -416,6 +438,8 @@
     function startPlugin() {
         if (window.kinopub_plugin) return;
         window.kinopub_plugin = true;
+
+        console.log('KinoPub: Starting plugin v' + CONFIG.version);
 
         addStyles();
 
