@@ -3,7 +3,7 @@
 
     var CONFIG = {
         name: 'KinoPub',
-        version: '1.0.1',
+        version: '1.0.2',
         apiBase: 'https://api.service-kp.com/v1',
         token: '1ksgubh1qkewyq3u4z65bpnwn9eshhn2',
         protocol: 'hls4',
@@ -156,6 +156,9 @@
         var filterData = { season: [] };
         var currentSeason = 0;
 
+        // Добавляем scroll в Explorer
+        files.appendFiles(scroll.render());
+
         this.initialize = function() {
             console.log('KinoPub: Initialize');
             this.loading(true);
@@ -208,9 +211,12 @@
         this.showSearchResults = function(items) {
             var self = this;
             console.log('KinoPub: showSearchResults', items.length);
+            
             scroll.clear();
 
-            items.slice(0, 10).forEach(function(item) {
+            items.slice(0, 10).forEach(function(item, index) {
+                console.log('KinoPub: Adding item', index, item.title);
+                
                 var html = $('<div class="selector kinopub-item"></div>');
                 html.append('<div class="kinopub-item__title">' + item.title + '</div>');
                 html.append('<div class="kinopub-item__info">' + (item.year || '') + ' • ' + (item.type || '') + '</div>');
@@ -224,6 +230,8 @@
 
                 scroll.append(html);
             });
+
+            console.log('KinoPub: Items in scroll:', scroll.render().find('.kinopub-item').length);
 
             this.loading(false);
             Lampa.Controller.enable('content');
