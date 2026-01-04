@@ -60,6 +60,8 @@
     function extractVideoUrl(files) {
         if (!files || !files.length) return null;
 
+        console.log('KinoPub FILES:', JSON.stringify(files, null, 2));
+
         var allQualities = {};
         var protocols = ['hls4', 'hls', 'http'];
 
