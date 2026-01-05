@@ -1,100 +1,118 @@
 (function () {
     'use strict';
 
-    function cardify_details() {
-        // Проверяем, загружен ли уже стиль
-        if (window.cardify_details_loaded) return;
-        window.cardify_details_loaded = true;
+    function cardify_full_start() {
+        if (window.cardify_detail_plugin) return;
+        window.cardify_detail_plugin = true;
 
-        // 1. Добавляем CSS для нового стиля
+        // CSS Стили для превращения обычного описания в Cardify
         var style = `
-            /* Скрываем старый фон и настраиваем новый */
+            /* Делаем контейнер относительным для позиционирования фона */
+            .full-start {
+                position: relative !important;
+                background-color: #000 !important;
+                overflow: hidden;
+            }
+
+            /* Скрываем стандартный фон, чтобы заменить своим */
             .full-start__background {
-                display: none;
+                display: none !important;
             }
-            .full-start.cardify-style {
+
+            /* Создаем наш слой фона */
+            .cardify-bg-layer {
+                position: absolute;
+                top: 0; left: 0; right: 0; bottom: 0;
                 background-size: cover;
-                background-position: center;
+                background-position: center top;
                 background-repeat: no-repeat;
-                position: relative;
+                opacity: 0.6; /* Немного затемняем саму картинку */
+                z-index: 0;
+                transition: opacity 0.5s ease;
             }
-            .full-start.cardify-style::before {
+
+            /* Градиент поверх картинки, чтобы текст читался */
+            .cardify-bg-layer::after {
                 content: '';
                 position: absolute;
                 top: 0; left: 0; right: 0; bottom: 0;
-                background: linear-gradient(to top, #000 0%, rgba(0,0,0,0.8) 40%, rgba(0,0,0,0.4) 100%);
-                z-index: 1;
+                background: linear-gradient(to top, #000 5%, rgba(0,0,0,0.8) 40%, rgba(0,0,0,0.2) 100%);
             }
-            
-            /* Контент поверх фона */
-            .full-start.cardify-style .full-start__body {
+
+            /* Скрываем постер слева */
+            .full-start__poster {
+                display: none !important;
+            }
+
+            /* Растягиваем блок с текстом на всю ширину */
+            .full-start__body {
                 position: relative;
                 z-index: 2;
+                width: 100% !important;
+                padding-left: 2em !important; /* Отступ слева */
+                padding-right: 2em !important;
+                padding-bottom: 2em !important;
                 display: flex;
                 flex-direction: column;
-                justify-content: flex-end;
-                height: 100%;
-                padding-bottom: 3em;
+                justify-content: flex-end; /* Прижимаем текст к низу */
+                min-height: 80vh; /* Минимальная высота */
             }
 
-            /* Скрываем обычный постер слева, так как он теперь фон */
-            .full-start.cardify-style .full-start__poster {
-                display: none;
-            }
-
-            /* Настройки текста */
-            .full-start.cardify-style .full-start__title {
-                font-size: 3em;
+            /* Увеличиваем заголовок */
+            .full-start__title {
+                font-size: 3.5em !important;
                 line-height: 1.1;
-                margin-bottom: 0.3em;
-                text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+                margin-bottom: 0.2em;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.9);
             }
-            .full-start.cardify-style .full-start__original-title {
-                opacity: 0.7;
-                font-size: 1.2em;
-            }
-            .full-start.cardify-style .full-start__tagline {
-                color: #fbc02d;
-                font-style: italic;
-                margin-bottom: 1em;
-            }
-            .full-start.cardify-style .description {
-                max-width: 70%;
+
+            /* Стиль описания */
+            .full-start__description {
                 font-size: 1.1em;
                 line-height: 1.6;
                 color: #ddd;
-                margin-bottom: 2em;
-                text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+                max-width: 80%; /* Чтобы строки не были слишком длинными */
+                text-shadow: 1px 1px 2px rgba(0,0,0,0.9);
             }
-
-            /* Кнопки */
-            .full-start.cardify-style .full-start__buttons {
-                margin-top: 1em;
+            
+            /* Поднимаем кнопки чуть выше */
+            .full-start__buttons {
+                margin-top: 1.5em;
             }
         `;
-        
+
         Lampa.Utils.addStyle(style);
 
-        // 2. Перехватываем событие открытия полного описания
+        // Слушаем событие открытия карточки
         Lampa.Listener.follow('full', function (e) {
+            // Событие 'complite' (опечатка в ядре лампы, так и пишем) означает, что HTML построен
             if (e.type == 'complite') {
                 var html = e.object.activity.render();
-                
-                // Добавляем наш класс
-                html.addClass('cardify-style');
+                var data = e.data.movie || e.data;
 
-                // Устанавливаем фон из постера или бэкдропа
-                var img = e.data.background_image || e.data.poster_path || e.data.img;
-                if(img){
-                    // Если путь не полный, добавляем базовый URL TMDB
-                    if(img.indexOf('http') === -1) img = 'https://image.tmdb.org/t/p/original' + img;
-                    html.css('background-image', 'url(' + img + ')');
+                // Находим картинку: сначала пробуем backdrop (горизонтальная), если нет - poster
+                var img = data.backdrop_path || data.poster_path || data.img;
+                
+                // Формируем полный URL для TMDB в высоком качестве (original)
+                var img_url = img;
+                if (img && img.indexOf('http') === -1) {
+                    img_url = 'https://image.tmdb.org/t/p/original' + img;
+                }
+
+                // Удаляем старый слой Cardify если он вдруг остался
+                html.find('.cardify-bg-layer').remove();
+
+                // Добавляем наш фон
+                if (img_url) {
+                    html.prepend('<div class="cardify-bg-layer" style="background-image: url(' + img_url + ')"></div>');
                 }
             }
         });
+        
+        console.log('Cardify Detail Plugin: Loaded');
     }
 
-    if (window.appready) cardify_details();
-    else Lampa.Listener.follow('app', 'ready', cardify_details);
+    if (window.appready) cardify_full_start();
+    else Lampa.Listener.follow('app', 'ready', cardify_full_start);
 
 })();
