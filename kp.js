@@ -10,7 +10,7 @@
         name: 'KinoPub',
         version: '2.1.0',
         apiBase: 'https://api.service-kp.com/v1',
-        token: '1ksgubh1qkewyq3u4z65bpnwn9eshhn2',
+        token: '',
         protocol: 'hls4'
     };
 
