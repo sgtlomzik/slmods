@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '1.9.5'; // MENU BLUR UPDATE
+    var PLUGIN_VERSION = '1.9.6';
     var DEBUG = true;
     
     // ==================== HLS.JS LOADER ====================
@@ -141,41 +141,60 @@
         return { search: search };
     })();
 
-    // ==================== BACKGROUND TRAILER (HTML5 Video) ====================
+    // ==================== RATINGS RENDERER ====================
+    var RatingsRenderer = {
+        render: function(container, card) {
+            container.find('.cardify-ratings-list').remove();
+            
+            var ratingsHtml = '<div class="cardify-ratings-list">';
+            var hasRatings = false;
+
+            // TMDB
+            if (card.vote_average > 0) {
+                hasRatings = true;
+                ratingsHtml += '<div class="cardify-rate-item tmdb"><div class="cardify-rate-icon">TMDB</div><div class="cardify-rate-value">' + parseFloat(card.vote_average).toFixed(1) + '</div></div>';
+            }
+            
+            // KP (Kinopoisk) - проверяем разные поля, куда плагины могут писать рейтинг
+            var kp = card.kp_rating || card.rating_kinopoisk || (card.ratings && card.ratings.kp);
+            if (kp && kp > 0) {
+                hasRatings = true;
+                ratingsHtml += '<div class="cardify-rate-item kp"><div class="cardify-rate-icon">KP</div><div class="cardify-rate-value">' + parseFloat(kp).toFixed(1) + '</div></div>';
+            }
+
+            // IMDB
+            var imdb = card.imdb_rating || (card.ratings && card.ratings.imdb);
+            if (imdb && imdb > 0) {
+                hasRatings = true;
+                ratingsHtml += '<div class="cardify-rate-item imdb"><div class="cardify-rate-icon">IMDb</div><div class="cardify-rate-value">' + parseFloat(imdb).toFixed(1) + '</div></div>';
+            }
+
+            ratingsHtml += '</div>';
+
+            if (hasRatings) {
+                container.find('.cardify__right').append(ratingsHtml);
+            }
+        }
+    };
+
+    // ==================== BACKGROUND TRAILER ====================
     var BackgroundTrailer = function(render, video, onDestroy) {
         var self = this;
         this.destroyed = false;
         
         this.background = render.find('.full-start__background');
         
+        // Removed Sound Toggle
         this.html = $('\
             <div class="cardify-bg-video">\
                 <video class="cardify-bg-video__player" muted autoplay playsinline loop preload="auto"></video>\
                 <div class="cardify-bg-video__overlay"></div>\
-                <div class="cardify-sound-toggle selector">\
-                    <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>\
-                </div>\
             </div>\
         ');
         
         this.videoElement = this.html.find('video')[0];
-        this.soundButton = this.html.find('.cardify-sound-toggle');
         this.background.after(this.html);
         
-        // Sound Logic
-        this.soundButton.on('click', function(e) {
-            e.stopPropagation();
-            if (self.videoElement.muted) {
-                self.videoElement.muted = false;
-                $(this).html('<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>');
-                $(this).addClass('active');
-            } else {
-                self.videoElement.muted = true;
-                $(this).html('<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>');
-                $(this).removeClass('active');
-            }
-        });
-
         // Smart Zoom Logic
         this.updateScale = function() {
             if (self.destroyed) return;
@@ -318,9 +337,10 @@
             cardify_show_original_title: { ru: 'Оригинальное название', en: 'Original title', uk: 'Оригінальна назва' }
         });
 
-        Lampa.Template.add('full_start_new', '<div class="full-start-new cardify"><div class="full-start-new__body"><div class="full-start-new__left hide"><div class="full-start-new__poster"><img class="full-start-new__img full--poster" /></div></div><div class="full-start-new__right"><div class="cardify__left"><div class="full-start-new__head"></div><div class="full-start-new__title">{title}</div><div class="full-start-new__details"></div><div class="full-start-new__buttons"><div class="full-start__button selector button--play"><svg width="28" height="29" viewBox="0 0 28 29" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="14" cy="14.5" r="13" stroke="currentColor" stroke-width="2.7"/><path d="M18.0739 13.634C18.7406 14.0189 18.7406 14.9811 18.0739 15.366L11.751 19.0166C11.0843 19.4015 10.251 18.9204 10.251 18.1506L10.251 10.8494C10.251 10.0796 11.0843 9.5985 11.751 9.9834L18.0739 13.634Z" fill="currentColor"/></svg><span>#{title_watch}</span></div><div class="full-start__button selector button--book"><svg width="21" height="32" viewBox="0 0 21 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 1.5H19C19.2761 1.5 19.5 1.72386 19.5 2V27.9618C19.5 28.3756 19.0261 28.6103 18.697 28.3595L12.6212 23.7303C11.3682 22.7757 9.63183 22.7757 8.37885 23.7303L2.30302 28.3595C1.9739 28.6103 1.5 28.3756 1.5 27.9618V2C1.5 1.72386 1.72386 1.5 2 1.5Z" stroke="currentColor" stroke-width="2.5"/></svg><span>#{settings_input_links}</span></div><div class="full-start__button selector button--reaction"><svg width="38" height="34" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M37.208 10.97L12.07 0.11C11.72-0.04 11.32-0.04 10.97 0.11C10.63 0.25 10.35 0.53 10.2 0.88L0.11 25.25C0.04 25.42 0 25.61 0 25.8C0 25.98 0.04 26.17 0.11 26.34C0.18 26.51 0.29 26.67 0.42 26.8C0.55 26.94 0.71 27.04 0.88 27.11L17.25 33.89C17.59 34.04 17.99 34.04 18.34 33.89L29.66 29.2C29.83 29.13 29.99 29.03 30.12 28.89C30.25 28.76 30.36 28.6 30.43 28.43L37.21 12.07C37.28 11.89 37.32 11.71 37.32 11.52C37.32 11.33 37.28 11.15 37.21 10.97ZM20.43 29.94L21.88 26.43L25.39 27.89L20.43 29.94ZM28.34 26.02L21.65 23.25C21.3 23.11 20.91 23.11 20.56 23.25C20.21 23.4 19.93 23.67 19.79 24.02L17.02 30.71L3.29 25.02L12.29 3.29L34.03 12.29L28.34 26.02Z" fill="currentColor"/><path d="M25.35 16.98L24.26 14.34L16.96 17.37L15.72 14.38L13.09 15.47L15.42 21.09L25.35 16.98Z" fill="currentColor"/></svg><span>#{title_reactions}</span></div><div class="full-start__button selector button--subscribe hide"></div><div class="full-start__button selector button--options"><svg width="38" height="10" viewBox="0 0 38 10" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="4.89" cy="4.99" r="4.75" fill="currentColor"/><circle cx="18.97" cy="4.99" r="4.75" fill="currentColor"/><circle cx="33.06" cy="4.99" r="4.75" fill="currentColor"/></svg></div></div></div><div class="cardify__right"><div class="full-start-new__reactions selector"><div>#{reactions_none}</div></div><div class="full-start-new__rate-line"><div class="full-start__pg hide"></div><div class="full-start__status hide"></div></div></div></div></div><div class="hide buttons--container"><div class="full-start__button view--torrent hide"></div><div class="full-start__button selector view--trailer"></div></div></div>');
+        // Template: Removed reactions block in favor of ratings
+        Lampa.Template.add('full_start_new', '<div class="full-start-new cardify"><div class="full-start-new__body"><div class="full-start-new__left hide"><div class="full-start-new__poster"><img class="full-start-new__img full--poster" /></div></div><div class="full-start-new__right"><div class="cardify__left"><div class="full-start-new__head"></div><div class="full-start-new__title">{title}</div><div class="full-start-new__details"></div><div class="full-start-new__buttons"><div class="full-start__button selector button--play"><svg width="28" height="29" viewBox="0 0 28 29" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="14" cy="14.5" r="13" stroke="currentColor" stroke-width="2.7"/><path d="M18.0739 13.634C18.7406 14.0189 18.7406 14.9811 18.0739 15.366L11.751 19.0166C11.0843 19.4015 10.251 18.9204 10.251 18.1506L10.251 10.8494C10.251 10.0796 11.0843 9.5985 11.751 9.9834L18.0739 13.634Z" fill="currentColor"/></svg><span>#{title_watch}</span></div><div class="full-start__button selector button--book"><svg width="21" height="32" viewBox="0 0 21 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 1.5H19C19.2761 1.5 19.5 1.72386 19.5 2V27.9618C19.5 28.3756 19.0261 28.6103 18.697 28.3595L12.6212 23.7303C11.3682 22.7757 9.63183 22.7757 8.37885 23.7303L2.30302 28.3595C1.9739 28.6103 1.5 28.3756 1.5 27.9618V2C1.5 1.72386 1.72386 1.5 2 1.5Z" stroke="currentColor" stroke-width="2.5"/></svg><span>#{settings_input_links}</span></div><div class="full-start__button selector button--reaction"><svg width="38" height="34" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M37.208 10.97L12.07 0.11C11.72-0.04 11.32-0.04 10.97 0.11C10.63 0.25 10.35 0.53 10.2 0.88L0.11 25.25C0.04 25.42 0 25.61 0 25.8C0 25.98 0.04 26.17 0.11 26.34C0.18 26.51 0.29 26.67 0.42 26.8C0.55 26.94 0.71 27.04 0.88 27.11L17.25 33.89C17.59 34.04 17.99 34.04 18.34 33.89L29.66 29.2C29.83 29.13 29.99 29.03 30.12 28.89C30.25 28.76 30.36 28.6 30.43 28.43L37.21 12.07C37.28 11.89 37.32 11.71 37.32 11.52C37.32 11.33 37.28 11.15 37.21 10.97ZM20.43 29.94L21.88 26.43L25.39 27.89L20.43 29.94ZM28.34 26.02L21.65 23.25C21.3 23.11 20.91 23.11 20.56 23.25C20.21 23.4 19.93 23.67 19.79 24.02L17.02 30.71L3.29 25.02L12.29 3.29L34.03 12.29L28.34 26.02Z" fill="currentColor"/><path d="M25.35 16.98L24.26 14.34L16.96 17.37L15.72 14.38L13.09 15.47L15.42 21.09L25.35 16.98Z" fill="currentColor"/></svg><span>#{title_reactions}</span></div><div class="full-start__button selector button--subscribe hide"></div><div class="full-start__button selector button--options"><svg width="38" height="10" viewBox="0 0 38 10" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="4.89" cy="4.99" r="4.75" fill="currentColor"/><circle cx="18.97" cy="4.99" r="4.75" fill="currentColor"/><circle cx="33.06" cy="4.99" r="4.75" fill="currentColor"/></svg></div></div></div><div class="cardify__right"></div></div></div><div class="hide buttons--container"><div class="full-start__button view--torrent hide"></div><div class="full-start__button selector view--trailer"></div></div></div>');
 
-        // CSS Update: MENU OPEN BLUR EFFECT
+        // CSS Update
         var style = $('<style id="cardify-css">\
             .cardify .full-start-new__body{height:80vh}\
             .cardify .full-start-new__right{display:flex;align-items:flex-end}\
@@ -330,10 +350,6 @@
             .cardify img.full--logo,.cardify .full-start__title-img{max-height:24em !important;max-width:90% !important;height:auto !important;width:auto !important;object-fit:contain !important}\
             .cardify__left{flex-grow:1;max-width:70%;position:relative;z-index:2}\
             .cardify__right{display:flex;align-items:center;flex-shrink:0;position:relative;z-index:2}\
-            .cardify .full-start-new__reactions{margin:0;margin-right:-2.8em}\
-            .cardify .full-start-new__reactions:not(.focus){margin:0}\
-            .cardify .full-start-new__reactions:not(.focus)>div:not(:first-child){display:none}\
-            .cardify .full-start-new__rate-line{margin:0;margin-left:3.5em}\
             .cardify__background{left:0;transition:opacity 1s ease}\
             .cardify__background.cardify-bg-hidden{opacity:0 !important}\
             \
@@ -342,18 +358,9 @@
             \
             .cardify-bg-video__player {\
                 width: 100%; height: 100%; object-fit: cover;\
-                transition: transform 1s ease, filter 0.5s ease;\
-                will-change: transform, filter;\
+                transition: transform 1s ease;\
+                will-change: transform;\
                 filter: brightness(0.85) saturate(1.1);\
-            }\
-            \
-            /* === MENU OPEN EFFECT === */\
-            body.menu--open .cardify-bg-video__player {\
-                filter: blur(8px) brightness(0.4) !important;\
-                transform: scale(1.45);\
-            }\
-            body.menu--open .cardify-bg-video__overlay {\
-                background: rgba(0,0,0,0.5);\
             }\
             \
             .cardify-bg-video__overlay {\
@@ -361,19 +368,16 @@
                 background: linear-gradient(90deg, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.5) 40%, transparent 100%),\
                             linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 30%);\
                 pointer-events: none;\
-                transition: background 0.5s ease;\
             }\
             \
-            .cardify-sound-toggle {\
-                position: absolute; bottom: 22%; right: 3%; z-index: 5; pointer-events: auto;\
-                width: 2.5em; height: 2.5em; border-radius: 50%;\
-                background: rgba(255,255,255,0.1); backdrop-filter: blur(5px);\
-                display: flex; align-items: center; justify-content: center;\
-                cursor: pointer; opacity: 0.7; transition: all 0.3s;\
-                color: #fff;\
-            }\
-            .cardify-sound-toggle:hover, .cardify-sound-toggle.focus { opacity: 1; background: rgba(255,255,255,0.25); transform: scale(1.1); }\
-            .cardify-sound-toggle svg { width: 60%; height: 60%; }\
+            /* Ratings CSS */\
+            .cardify-ratings-list { display: flex; gap: 1em; margin-right: 1em; }\
+            .cardify-rate-item { display: flex; flex-direction: column; align-items: center; background: rgba(255,255,255,0.1); padding: 0.5em 1em; border-radius: 0.5em; backdrop-filter: blur(5px); min-width: 3.5em; }\
+            .cardify-rate-icon { font-size: 0.7em; opacity: 0.7; margin-bottom: 0.2em; font-weight: bold; }\
+            .cardify-rate-value { font-size: 1.4em; font-weight: bold; color: #fff; }\
+            .cardify-rate-item.tmdb .cardify-rate-value { color: #21d07a; }\
+            .cardify-rate-item.kp .cardify-rate-value { color: #f50; }\
+            .cardify-rate-item.imdb .cardify-rate-value { color: #f5c518; }\
             \
             .cardify-original-titles{margin-bottom:1em;display:flex;flex-direction:column;gap:0.3em;position:relative;z-index:2}\
             .cardify-original-titles__item{display:flex;align-items:center;gap:0.8em;font-size:1.4em;opacity:0.9}\
@@ -394,6 +398,11 @@
                 var render = e.object.activity.render();
                 var activityId = e.object.activity.id || Date.now();
                 render.find('.full-start__background').addClass('cardify__background');
+
+                // Render Ratings instead of reactions
+                if (e.data.movie) {
+                    RatingsRenderer.render(render, e.data.movie);
+                }
 
                 if (Lampa.Storage.field('cardify_show_original_title') !== false && e.data.movie) {
                     OriginalTitle.fetch(e.data.movie).then(function(titles) {
