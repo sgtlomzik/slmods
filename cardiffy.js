@@ -1,11 +1,10 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '2.1.1-DEBUG';
+    var PLUGIN_VERSION = '2.2.0';
     var DEBUG = true;
-    var LOG_PREFIX = 'Cardify'; // Единый префикс для всех логов
+    var LOG_PREFIX = 'Cardify';
 
-    // ==================== КОНФИГУРАЦИЯ ====================
     var CONFIG = {
         AJAX_TIMEOUT: 5000,
         ROOTU_TIMEOUT: 2000,
@@ -30,7 +29,6 @@
     }
     var $ = window.$ || window.jQuery;
 
-    // ==================== ЕДИНОЕ ЛОГИРОВАНИЕ ====================
     function log() {
         if (!DEBUG) return;
         var args = Array.prototype.slice.call(arguments);
@@ -43,84 +41,43 @@
         console.log(LOG_PREFIX, message);
     }
 
-    // ==================== ДИАГНОСТИКА ====================
     var Diag = {
         results: [],
-        
         add: function(category, message, data) {
-            var entry = {
-                time: new Date().toLocaleTimeString(),
-                cat: category,
-                msg: message,
-                data: data || null
-            };
+            var entry = { time: new Date().toLocaleTimeString(), cat: category, msg: message, data: data || null };
             this.results.push(entry);
-            
-            // Логируем с единым префиксом
-            if (data) {
-                log('[' + category + ']', message, data);
-            } else {
-                log('[' + category + ']', message);
-            }
-        },
-        
-        checkVideoSupport: function() {
-            var video = document.createElement('video');
-            var support = {
-                nativeHLS: video.canPlayType('application/vnd.apple.mpegurl'),
-                mp4: video.canPlayType('video/mp4'),
-                webm: video.canPlayType('video/webm'),
-                ts: video.canPlayType('video/mp2t'),
-                MSE: typeof MediaSource !== 'undefined',
-                MSE_H264: false
-            };
-            
-            if (support.MSE) {
-                try {
-                    support.MSE_H264 = MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"');
-                } catch(e) {}
-            }
-            
-            this.add('SUPPORT', 'Video capabilities', support);
-            return support;
-        },
-        
-        checkHlsJs: function() {
-            var result = {
-                loaded: typeof Hls !== 'undefined',
-                supported: typeof Hls !== 'undefined' && Hls.isSupported()
-            };
-            this.add('HLS.JS', 'Status', result);
-            return result;
-        },
-        
-        report: function() {
-            log('=== DIAGNOSTIC REPORT ===');
-            this.results.forEach(function(r) {
-                log(r.time, '[' + r.cat + ']', r.msg, r.data || '');
-            });
-            log('=== END REPORT ===');
+            if (data) { log('[' + category + ']', message, data); } 
+            else { log('[' + category + ']', message); }
         }
     };
 
     log('Plugin loading... v' + PLUGIN_VERSION);
     
-    // Проверяем поддержку видео сразу
-    var videoSupport = Diag.checkVideoSupport();
+    var videoSupport = (function() {
+        var video = document.createElement('video');
+        var support = {
+            nativeHLS: video.canPlayType('application/vnd.apple.mpegurl'),
+            mp4: video.canPlayType('video/mp4'),
+            MSE: typeof MediaSource !== 'undefined',
+            MSE_H264: false
+        };
+        if (support.MSE) {
+            try { support.MSE_H264 = MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"'); } catch(e) {}
+        }
+        Diag.add('SUPPORT', 'Video capabilities', support);
+        return support;
+    })();
 
-    // ==================== HLS.JS LOADER ====================
     var hlsReady = new Promise(function(resolve) {
         if (typeof Hls !== 'undefined') {
             Diag.add('HLS.JS', 'Already loaded');
             resolve(true);
             return;
         }
-        
         var script = document.createElement('script');
         script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.4.12';
         script.onload = function() {
-            Diag.add('HLS.JS', 'Loaded successfully');
-            Diag.checkHlsJs();
+            Diag.add('HLS.JS', 'Loaded', { supported: Hls.isSupported() });
             resolve(true);
         };
         script.onerror = function() {
@@ -130,15 +87,10 @@
         document.head.appendChild(script);
     });
 
-    // ==================== УТИЛИТЫ ====================
     var Utils = {
         _counter: 0,
-        generateId: function(prefix) {
-            return (prefix || 'cardify') + '_' + (++this._counter) + '_' + Date.now();
-        },
-        cleanString: function(str) {
-            return (str || '').replace(/[^a-zA-Z\dа-яА-ЯёЁ]+/g, ' ').trim().toLowerCase();
-        },
+        generateId: function(prefix) { return (prefix || 'cardify') + '_' + (++this._counter) + '_' + Date.now(); },
+        cleanString: function(str) { return (str || '').replace(/[^a-zA-Z\dа-яА-ЯёЁ]+/g, ' ').trim().toLowerCase(); },
         extractVideoId: function(url) {
             if (!url) return null;
             var m = url.match(/rutube\.ru\/(play\/embed|video\/private|video|shorts)\/([\da-f]{32,})/i);
@@ -149,7 +101,6 @@
         }
     };
 
-    // ==================== AJAX MANAGER ====================
     var AjaxManager = {
         _requests: {},
         request: function(options, groupId) {
@@ -182,26 +133,20 @@
         }
     };
 
-    // ==================== CACHE ====================
     var TrailerCache = {
         _memoryCache: {},
         get: function(movie) {
             var key = Utils.getMovieCacheKey(movie);
             if (this._memoryCache[key]) {
                 var mem = this._memoryCache[key];
-                if (Date.now() - mem.timestamp < CONFIG.STREAM_CACHE_TTL_MS) {
-                    return mem.data;
-                }
+                if (Date.now() - mem.timestamp < CONFIG.STREAM_CACHE_TTL_MS) return mem.data;
             }
             try {
                 var stored = sessionStorage.getItem(key);
                 if (stored) {
                     var parsed = JSON.parse(stored);
-                    if (parsed.m3u8 && Date.now() - parsed.timestamp < CONFIG.STREAM_CACHE_TTL_MS) {
-                        this._memoryCache[key] = { data: parsed, timestamp: parsed.timestamp };
-                        return parsed;
-                    }
                     if (parsed.videoId && Date.now() - parsed.timestamp < CONFIG.CACHE_TTL_MS) {
+                        this._memoryCache[key] = { data: parsed, timestamp: parsed.timestamp };
                         return parsed;
                     }
                 }
@@ -213,15 +158,9 @@
             var record = $.extend({}, data, { timestamp: Date.now() });
             this._memoryCache[key] = { data: record, timestamp: Date.now() };
             try { sessionStorage.setItem(key, JSON.stringify(record)); } catch (e) {}
-        },
-        updateStream: function(movie, m3u8) {
-            var existing = this.get(movie) || {};
-            existing.m3u8 = m3u8;
-            this.set(movie, existing);
         }
     };
 
-    // ==================== DEBOUNCED STORAGE ====================
     var DebouncedStorage = {
         _pending: {}, _timeouts: {},
         set: function(key, value, delay) {
@@ -245,61 +184,163 @@
         }
     };
 
-    // ==================== RUTUBE API ====================
+    // ==================== RUTUBE API (ИСПРАВЛЕННЫЙ) ====================
     var RutubeAPI = (function() {
         var rootuApi = Lampa.Utils.protocol() + 'trailer.rootu.top/search/';
         var searchProxy = '';
         
-        function getStreamUrl(videoId, callback, groupId) {
-            Diag.add('STREAM', 'Requesting stream URL', { videoId: videoId });
+        // Список CORS прокси для ротации
+        var corsProxies = [
+            'https://corsproxy.io/?',
+            'https://api.allorigins.win/raw?url=',
+            'https://cors-anywhere.herokuapp.com/',
+            'https://thingproxy.freeboard.io/fetch/'
+        ];
+        var currentProxyIndex = 0;
+        
+        function getNextProxy() {
+            var proxy = corsProxies[currentProxyIndex];
+            currentProxyIndex = (currentProxyIndex + 1) % corsProxies.length;
+            return proxy;
+        }
+        
+        // Метод 1: Через Lampa proxy (если доступен)
+        function tryLampaProxy(videoId, callback, groupId) {
+            var proxyUrl = Lampa.Utils.protocol() + 'proxy.cub.watch/rutube/' + videoId;
             
-            var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
+            Diag.add('STREAM', 'Trying Lampa proxy', { videoId: videoId });
             
             AjaxManager.request({
-                url: apiUrl, dataType: 'json', timeout: CONFIG.STREAM_TIMEOUT,
+                url: proxyUrl,
+                dataType: 'json',
+                timeout: CONFIG.STREAM_TIMEOUT,
                 success: function(data) {
-                    if (data && data.video_balancer && data.video_balancer.m3u8) {
-                        var m3u8 = data.video_balancer.m3u8;
-                        Diag.add('STREAM', 'Got m3u8 URL', { url: m3u8.substring(0, 60) + '...' });
-                        callback({ m3u8: m3u8 });
+                    if (data && data.m3u8) {
+                        Diag.add('STREAM', 'Lampa proxy SUCCESS');
+                        callback({ m3u8: data.m3u8 });
+                    } else if (data && data.video_balancer && data.video_balancer.m3u8) {
+                        Diag.add('STREAM', 'Lampa proxy SUCCESS (v2)');
+                        callback({ m3u8: data.video_balancer.m3u8 });
                     } else {
-                        Diag.add('STREAM', 'No m3u8 in response, trying proxy');
-                        tryStreamProxy(videoId, callback, groupId);
+                        Diag.add('STREAM', 'Lampa proxy no data');
+                        tryYandexProxy(videoId, callback, groupId);
                     }
                 },
-                error: function(xhr) {
-                    if (xhr.statusText === 'abort') { 
-                        Diag.add('STREAM', 'Request aborted');
-                        callback(null); 
-                        return; 
-                    }
-                    Diag.add('STREAM', 'Request failed', { status: xhr.status });
-                    tryStreamProxy(videoId, callback, groupId);
+                error: function() {
+                    Diag.add('STREAM', 'Lampa proxy failed');
+                    tryYandexProxy(videoId, callback, groupId);
                 }
             }, groupId);
         }
         
-        function tryStreamProxy(videoId, callback, groupId) {
-            Diag.add('STREAM', 'Trying CORS proxy');
-            var proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(
-                'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2'
-            );
+        // Метод 2: Через Yandex/CUB proxy
+        function tryYandexProxy(videoId, callback, groupId) {
+            var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
+            var proxyUrl = Lampa.Utils.protocol() + 'cub.watch/api/proxy?url=' + encodeURIComponent(apiUrl);
+            
+            Diag.add('STREAM', 'Trying CUB proxy');
+            
             AjaxManager.request({
-                url: proxyUrl, dataType: 'json', timeout: CONFIG.STREAM_TIMEOUT,
+                url: proxyUrl,
+                dataType: 'json',
+                timeout: CONFIG.STREAM_TIMEOUT,
                 success: function(data) {
                     if (data && data.video_balancer && data.video_balancer.m3u8) {
-                        Diag.add('STREAM', 'Proxy success - got m3u8');
+                        Diag.add('STREAM', 'CUB proxy SUCCESS');
                         callback({ m3u8: data.video_balancer.m3u8 });
                     } else {
-                        Diag.add('STREAM', 'Proxy failed - no m3u8');
-                        callback(null);
+                        Diag.add('STREAM', 'CUB proxy no data');
+                        tryDirectEmbed(videoId, callback, groupId);
                     }
                 },
-                error: function(xhr) {
-                    Diag.add('STREAM', 'Proxy request failed', { status: xhr.status });
-                    callback(null);
+                error: function() {
+                    Diag.add('STREAM', 'CUB proxy failed');
+                    tryDirectEmbed(videoId, callback, groupId);
                 }
             }, groupId);
+        }
+        
+        // Метод 3: Парсинг embed страницы
+        function tryDirectEmbed(videoId, callback, groupId) {
+            var embedUrl = 'https://rutube.ru/play/embed/' + videoId;
+            var proxy = getNextProxy();
+            var proxyUrl = proxy + encodeURIComponent(embedUrl);
+            
+            Diag.add('STREAM', 'Trying embed parse', { proxy: proxy.substring(0, 30) });
+            
+            AjaxManager.request({
+                url: proxyUrl,
+                dataType: 'text',
+                timeout: CONFIG.STREAM_TIMEOUT,
+                success: function(html) {
+                    // Ищем m3u8 URL в HTML
+                    var m3u8Match = html.match(/["']([^"']*\.m3u8[^"']*?)["']/i);
+                    if (m3u8Match && m3u8Match[1]) {
+                        var m3u8Url = m3u8Match[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
+                        Diag.add('STREAM', 'Embed parse SUCCESS', { url: m3u8Url.substring(0, 50) });
+                        callback({ m3u8: m3u8Url });
+                        return;
+                    }
+                    
+                    // Ищем JSON с опциями
+                    var jsonMatch = html.match(/window\.Ya\.playerOptions\s*=\s*(\{[\s\S]*?\});/);
+                    if (jsonMatch) {
+                        try {
+                            var options = JSON.parse(jsonMatch[1]);
+                            if (options.video && options.video.m3u8) {
+                                Diag.add('STREAM', 'Embed JSON parse SUCCESS');
+                                callback({ m3u8: options.video.m3u8 });
+                                return;
+                            }
+                        } catch(e) {}
+                    }
+                    
+                    Diag.add('STREAM', 'Embed parse failed - no m3u8 found');
+                    tryRotatingProxy(videoId, callback, groupId, 0);
+                },
+                error: function() {
+                    Diag.add('STREAM', 'Embed request failed');
+                    tryRotatingProxy(videoId, callback, groupId, 0);
+                }
+            }, groupId);
+        }
+        
+        // Метод 4: Ротация CORS прокси
+        function tryRotatingProxy(videoId, callback, groupId, attempt) {
+            if (attempt >= corsProxies.length) {
+                Diag.add('STREAM', 'All proxies failed');
+                callback(null);
+                return;
+            }
+            
+            var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
+            var proxy = corsProxies[attempt];
+            var proxyUrl = proxy + encodeURIComponent(apiUrl);
+            
+            Diag.add('STREAM', 'Trying proxy #' + (attempt + 1), { proxy: proxy.substring(0, 25) });
+            
+            AjaxManager.request({
+                url: proxyUrl,
+                dataType: 'json',
+                timeout: CONFIG.STREAM_TIMEOUT,
+                success: function(data) {
+                    if (data && data.video_balancer && data.video_balancer.m3u8) {
+                        Diag.add('STREAM', 'Proxy #' + (attempt + 1) + ' SUCCESS');
+                        callback({ m3u8: data.video_balancer.m3u8 });
+                    } else {
+                        tryRotatingProxy(videoId, callback, groupId, attempt + 1);
+                    }
+                },
+                error: function() {
+                    tryRotatingProxy(videoId, callback, groupId, attempt + 1);
+                }
+            }, groupId);
+        }
+        
+        // Главная функция получения stream
+        function getStreamUrl(videoId, callback, groupId) {
+            Diag.add('STREAM', 'Getting stream', { videoId: videoId });
+            tryLampaProxy(videoId, callback, groupId);
         }
 
         function searchRootu(movie, isTv, callback, groupId) {
@@ -315,7 +356,7 @@
                     if (data && data.length && data[0].url) {
                         var videoId = Utils.extractVideoId(data[0].url);
                         if (videoId) { 
-                            Diag.add('SEARCH', 'Rootu found trailer', { videoId: videoId });
+                            Diag.add('SEARCH', 'Rootu found', { videoId: videoId });
                             callback({ title: data[0].title, videoId: videoId, source: 'rootu' }); 
                             return; 
                         }
@@ -347,7 +388,7 @@
                         if (rTitle.indexOf(cleanSearch) < 0) continue;
                         var videoId = Utils.extractVideoId(r.embed_url || r.video_url);
                         if (videoId) { 
-                            Diag.add('SEARCH', 'Rutube found trailer', { videoId: videoId });
+                            Diag.add('SEARCH', 'Rutube found', { videoId: videoId });
                             callback({ title: r.title, videoId: videoId, source: 'rutube' }); 
                             return; 
                         }
@@ -369,24 +410,15 @@
         
         function findTrailer(movie, isTv, callback, groupId) {
             var title = movie.title || movie.name || movie.original_title || movie.original_name || '';
-            if (!title || title.length < 2) { 
-                Diag.add('SEARCH', 'No title provided');
-                callback(null); 
-                return; 
-            }
+            if (!title || title.length < 2) { callback(null); return; }
             
             Diag.add('SEARCH', 'Looking for trailer', { title: title, id: movie.id });
             
             var cached = TrailerCache.get(movie);
             if (cached && cached.videoId) {
-                Diag.add('CACHE', 'Found in cache', { hasM3u8: !!cached.m3u8, videoId: cached.videoId });
-                if (cached.m3u8) {
-                    callback({ videoId: cached.videoId, m3u8: cached.m3u8, fromCache: true });
-                    return;
-                }
+                Diag.add('CACHE', 'Found in cache', { videoId: cached.videoId });
                 getStreamUrl(cached.videoId, function(stream) {
                     if (stream && stream.m3u8) {
-                        TrailerCache.updateStream(movie, stream.m3u8);
                         callback({ videoId: cached.videoId, m3u8: stream.m3u8 });
                     } else { callback(null); }
                 }, groupId);
@@ -422,10 +454,10 @@
                 TrailerCache.set(movie, { videoId: result.videoId, title: result.title });
                 getStreamUrl(result.videoId, function(stream) {
                     if (stream && stream.m3u8) {
-                        TrailerCache.updateStream(movie, stream.m3u8);
+                        Diag.add('STREAM', 'Got m3u8!', { url: stream.m3u8.substring(0, 50) });
                         callback({ videoId: result.videoId, m3u8: stream.m3u8 });
                     } else { 
-                        Diag.add('STREAM', 'Failed to get stream URL');
+                        Diag.add('STREAM', 'Failed to get stream');
                         callback(null); 
                     }
                 }, groupId);
@@ -438,7 +470,6 @@
         return { findTrailer: findTrailer, getStreamUrl: getStreamUrl };
     })();
 
-    // ==================== PREFETCH MANAGER ====================
     var PrefetchManager = {
         _pending: {}, _prefetched: {},
         prefetch: function(movie, isTv) {
@@ -446,7 +477,7 @@
             var key = Utils.getMovieCacheKey(movie);
             if (this._prefetched[key] || this._pending[key]) return;
             var cached = TrailerCache.get(movie);
-            if (cached && cached.m3u8) { this._prefetched[key] = true; return; }
+            if (cached && cached.videoId) { this._prefetched[key] = true; return; }
             this._pending[key] = true;
             var self = this;
             RutubeAPI.findTrailer(movie, isTv, function(result) {
@@ -461,7 +492,6 @@
         }
     };
 
-    // ==================== RATINGS RENDERER ====================
     var RatingsRenderer = {
         render: function(container, card) {
             var $container = $(container);
@@ -488,7 +518,6 @@
         }
     };
 
-    // ==================== BACKGROUND TRAILER ====================
     var BackgroundTrailer = function(render, trailerData, onDestroy) {
         var self = this;
         this.destroyed = false;
@@ -515,7 +544,6 @@
         this._boundOnPlaying = this._onPlaying.bind(this);
         this._boundOnError = this._onError.bind(this);
         this._boundOnCanPlay = this._onCanPlay.bind(this);
-        this._boundOnWaiting = this._onWaiting.bind(this);
         this._onDestroy = onDestroy;
         
         window.addEventListener('resize', this._boundUpdateScale);
@@ -526,7 +554,7 @@
             RutubeAPI.getStreamUrl(trailerData.videoId, function(stream) {
                 if (self.destroyed) return;
                 if (!stream || !stream.m3u8) { 
-                    Diag.add('VIDEO', 'No stream URL, destroying');
+                    Diag.add('VIDEO', 'No stream, destroying');
                     self.destroy(); 
                     return; 
                 }
@@ -547,28 +575,24 @@
         var self = this;
         var video = this.videoElement;
         
-        Diag.add('VIDEO', 'Loading stream', { url: m3u8Url.substring(0, 50) + '...' });
+        Diag.add('VIDEO', 'Loading stream', { url: m3u8Url.substring(0, 60) });
         
-        // Проверяем Native HLS
         var nativeSupport = video.canPlayType('application/vnd.apple.mpegurl');
-        Diag.add('VIDEO', 'Native HLS support', { value: nativeSupport || 'none' });
+        Diag.add('VIDEO', 'Native HLS', { support: nativeSupport || 'none' });
         
         if (nativeSupport && nativeSupport !== '') {
             Diag.add('VIDEO', 'Using NATIVE HLS');
             video.src = m3u8Url;
             this._setupVideoEvents();
-            setTimeout(function() {
-                if (!self.destroyed) self._tryPlay();
-            }, 100);
+            setTimeout(function() { if (!self.destroyed) self._tryPlay(); }, 100);
             return;
         }
         
-        // HLS.js
         hlsReady.then(function(loaded) {
             if (self.destroyed) return;
             
             var hlsSupported = loaded && typeof Hls !== 'undefined' && Hls.isSupported();
-            Diag.add('VIDEO', 'HLS.js check', { loaded: loaded, supported: hlsSupported });
+            Diag.add('VIDEO', 'HLS.js', { loaded: loaded, supported: hlsSupported });
             
             if (hlsSupported) {
                 Diag.add('VIDEO', 'Using HLS.JS');
@@ -583,46 +607,31 @@
                 });
                 
                 self.hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
-                    Diag.add('VIDEO', 'HLS manifest parsed', { levels: data.levels.length });
+                    Diag.add('VIDEO', 'Manifest parsed', { levels: data.levels.length });
                     self._tryPlay();
                 });
                 
                 self.hls.on(Hls.Events.ERROR, function(event, data) {
-                    Diag.add('VIDEO', 'HLS error', { 
-                        type: data.type, 
-                        fatal: data.fatal, 
-                        details: data.details 
-                    });
+                    Diag.add('VIDEO', 'HLS error', { type: data.type, fatal: data.fatal, details: data.details });
                     if (data.fatal) {
                         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                            Diag.add('VIDEO', 'Trying network recovery');
                             self.hls.startLoad();
                         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                            Diag.add('VIDEO', 'Trying media recovery');
                             self.hls.recoverMediaError();
                         } else {
-                            Diag.add('VIDEO', 'Fatal error, destroying');
                             self.destroy();
                         }
                     }
-                });
-                
-                self.hls.on(Hls.Events.FRAG_LOADED, function() {
-                    Diag.add('VIDEO', 'First fragment loaded');
-                    // Удаляем этот listener после первого фрагмента
-                    self.hls.off(Hls.Events.FRAG_LOADED);
                 });
                 
                 self.hls.loadSource(m3u8Url);
                 self.hls.attachMedia(video);
                 self._setupVideoEvents();
             } else {
-                Diag.add('VIDEO', 'Using DIRECT source (fallback)');
+                Diag.add('VIDEO', 'Direct source fallback');
                 video.src = m3u8Url;
                 self._setupVideoEvents();
-                setTimeout(function() {
-                    if (!self.destroyed) self._tryPlay();
-                }, 100);
+                setTimeout(function() { if (!self.destroyed) self._tryPlay(); }, 100);
             }
         });
     };
@@ -632,7 +641,6 @@
         video.addEventListener('loadedmetadata', this._boundOnMetadata);
         video.addEventListener('canplay', this._boundOnCanPlay);
         video.addEventListener('playing', this._boundOnPlaying);
-        video.addEventListener('waiting', this._boundOnWaiting);
         video.addEventListener('error', this._boundOnError);
     };
     
@@ -642,17 +650,15 @@
         video.removeEventListener('loadedmetadata', this._boundOnMetadata);
         video.removeEventListener('canplay', this._boundOnCanPlay);
         video.removeEventListener('playing', this._boundOnPlaying);
-        video.removeEventListener('waiting', this._boundOnWaiting);
         video.removeEventListener('error', this._boundOnError);
     };
     
     BackgroundTrailer.prototype._onMetadata = function() {
         if (this.destroyed) return;
-        Diag.add('VIDEO', 'Metadata loaded', { 
+        Diag.add('VIDEO', 'Metadata', { 
             duration: Math.round(this.videoElement.duration),
             size: this.videoElement.videoWidth + 'x' + this.videoElement.videoHeight
         });
-        
         var video = this.videoElement;
         if (video.duration > CONFIG.VIDEO_MIN_DURATION_FOR_SKIP) {
             video.currentTime = CONFIG.VIDEO_SKIP_SECONDS;
@@ -662,7 +668,7 @@
     
     BackgroundTrailer.prototype._onCanPlay = function() {
         if (this.destroyed) return;
-        Diag.add('VIDEO', 'Can play event', { readyState: this.videoElement.readyState });
+        Diag.add('VIDEO', 'CanPlay', { readyState: this.videoElement.readyState });
         this._tryPlay();
     };
     
@@ -673,33 +679,20 @@
         this.$background.addClass('cardify-bg-hidden');
     };
     
-    BackgroundTrailer.prototype._onWaiting = function() {
-        Diag.add('VIDEO', 'Buffering...');
-    };
-    
     BackgroundTrailer.prototype._onError = function(e) {
         var video = this.videoElement;
-        var errorInfo = {
+        Diag.add('VIDEO', 'ERROR', {
             code: video.error ? video.error.code : 'none',
-            message: video.error ? video.error.message : 'none',
-            networkState: video.networkState,
-            readyState: video.readyState
-        };
-        Diag.add('VIDEO', 'ERROR!', errorInfo);
+            message: video.error ? video.error.message : 'none'
+        });
     };
     
     BackgroundTrailer.prototype._tryPlay = function() {
         var self = this;
         var video = this.videoElement;
-        
         if (!video || this.destroyed) return;
         
-        Diag.add('VIDEO', 'Attempting play', { 
-            paused: video.paused, 
-            readyState: video.readyState,
-            networkState: video.networkState,
-            muted: video.muted
-        });
+        Diag.add('VIDEO', 'Trying play', { paused: video.paused, readyState: video.readyState });
         
         video.muted = true;
         video.volume = 0;
@@ -707,21 +700,13 @@
         var playPromise = video.play();
         if (playPromise !== undefined) {
             playPromise.then(function() {
-                Diag.add('VIDEO', 'Play promise RESOLVED');
+                Diag.add('VIDEO', 'Play SUCCESS');
             }).catch(function(error) {
-                Diag.add('VIDEO', 'Play REJECTED', { 
-                    name: error.name, 
-                    message: error.message 
-                });
-                
-                // Повторная попытка
+                Diag.add('VIDEO', 'Play FAILED', { name: error.name, message: error.message });
                 setTimeout(function() {
                     if (self.destroyed) return;
-                    Diag.add('VIDEO', 'Retry play...');
                     video.muted = true;
-                    video.play().then(function() {
-                        Diag.add('VIDEO', 'Retry SUCCESS');
-                    }).catch(function(e) {
+                    video.play().catch(function(e) {
                         Diag.add('VIDEO', 'Retry FAILED', { message: e.message });
                     });
                 }, 500);
@@ -732,36 +717,20 @@
     BackgroundTrailer.prototype.destroy = function() {
         if (this.destroyed) return;
         this.destroyed = true;
-        Diag.add('VIDEO', 'Destroying player');
-        
+        Diag.add('VIDEO', 'Destroying');
         AjaxManager.abortGroup(this.groupId);
         window.removeEventListener('resize', this._boundUpdateScale);
         this._removeVideoEvents();
-        
-        if (this.hls) { 
-            try { this.hls.destroy(); } catch (e) {} 
-            this.hls = null; 
-        }
-        
+        if (this.hls) { try { this.hls.destroy(); } catch (e) {} this.hls = null; }
         if (this.videoElement) {
-            try { 
-                this.videoElement.pause(); 
-                this.videoElement.src = ''; 
-                this.videoElement.load(); 
-            } catch (e) {}
+            try { this.videoElement.pause(); this.videoElement.src = ''; this.videoElement.load(); } catch (e) {}
             this.videoElement = null;
         }
-        
         if (this.$background) this.$background.removeClass('cardify-bg-hidden');
         if (this.$html) { this.$html.remove(); this.$html = null; }
         if (typeof this._onDestroy === 'function') this._onDestroy();
-        
-        // Финальный отчёт
-        Diag.add('END', '=== Session ended ===');
-        Diag.report();
     };
 
-    // ==================== ORIGINAL TITLE ====================
     var OriginalTitle = (function() {
         var storageKey = "cardify_title_cache";
         var titleCache = null;
@@ -819,13 +788,10 @@
         return { init: cleanOldCache, fetch: fetchTitles, render: render };
     })();
 
-    // ==================== CSS ====================
     var CARDIFY_CSS = '.cardify .full-start-new__body{height:80vh}.cardify .full-start-new__right{display:flex;align-items:flex-end}.cardify .full-start-new__title{text-shadow:0 0 10px rgba(0,0,0,0.8);font-size:5em!important;line-height:1.1!important;margin-bottom:0.15em;position:relative;z-index:2}.cardify .full-start-new__details{margin-bottom:0.5em;font-size:1.3em;opacity:0.9;text-shadow:0 1px 2px rgba(0,0,0,0.8);position:relative;z-index:2}.cardify .full-start-new__head{margin-bottom:0.3em;position:relative;z-index:2}.cardify img.full--logo,.cardify .full-start__title-img{max-height:24em!important;max-width:90%!important;height:auto!important;width:auto!important;object-fit:contain!important}.cardify__left{flex-grow:1;max-width:70%;position:relative;z-index:2}.cardify__right{display:flex;align-items:center;flex-shrink:0;position:relative;z-index:2}.cardify__background{left:0;transition:opacity 1s ease}.cardify__background.cardify-bg-hidden{opacity:0!important}.cardify .full-start-new__reactions{display:none!important}.cardify .full-start-new__rate-line{margin:0 0 0 1em;display:flex;align-items:center}.cardify-bg-video{position:absolute;top:-20%;left:0;right:0;bottom:-20%;z-index:0;opacity:0;transition:opacity 1.5s ease;overflow:hidden;pointer-events:none}.cardify-bg-video--visible{opacity:1}.cardify-bg-video__player{width:100%;height:100%;object-fit:cover;transition:transform 1s ease;will-change:transform;filter:brightness(0.85) saturate(1.1)}.cardify-bg-video__overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,rgba(0,0,0,0.95) 0%,rgba(0,0,0,0.5) 40%,transparent 100%),linear-gradient(to top,rgba(0,0,0,0.9) 0%,transparent 30%);pointer-events:none}.cardify-ratings-list{display:flex;gap:0.8em;align-items:center}.cardify-rate-item{display:flex;flex-direction:row;align-items:center;gap:0.4em;border:2px solid rgba(255,255,255,0.5);border-radius:6px;padding:0.4em 0.8em;background:transparent;color:#fff}.cardify-rate-icon{font-size:0.9em;opacity:0.8;font-weight:normal;margin:0}.cardify-rate-value{font-size:1.1em;font-weight:bold;color:#fff!important}.cardify-rate-item.reaction{border-color:rgba(255,255,255,0.5)}.cardify-original-titles{margin-bottom:1em;display:flex;flex-direction:column;gap:0.3em;position:relative;z-index:2}.cardify-original-titles__item{display:flex;align-items:center;gap:0.8em;font-size:1.4em;opacity:0.9}.cardify-original-titles__text{color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.8)}.cardify-original-titles__label{font-size:0.7em;padding:0.2em 0.5em;background:rgba(255,255,255,0.2);border-radius:0.3em;text-transform:uppercase}.cardify .original_title{display:none!important}';
 
-    // ==================== PLUGIN START ====================
     function startPlugin() {
         Diag.add('INIT', 'Plugin starting', { version: PLUGIN_VERSION });
-        
         OriginalTitle.init();
 
         Lampa.Lang.add({
@@ -871,7 +837,7 @@
                 var render = e.object.activity.render();
                 var activityId = e.object.activity.id || Utils.generateId('activity');
                 
-                Diag.add('CARD', 'Card opened', { id: e.data.movie ? e.data.movie.id : 'unknown' });
+                Diag.add('CARD', 'Opened', { id: e.data.movie ? e.data.movie.id : 'unknown' });
                 
                 render.find('.full-start__background').addClass('cardify__background');
                 if (e.data.movie) RatingsRenderer.render(render, e.data.movie);
@@ -896,7 +862,7 @@
                 }
             }
             if (e.type === 'destroy') {
-                Diag.add('CARD', 'Card closed');
+                Diag.add('CARD', 'Closed');
                 var activityId = e.object.activity.id || 0;
                 AjaxManager.abortGroup('trailer_' + activityId);
                 if (activeTrailers[activityId]) { activeTrailers[activityId].destroy(); delete activeTrailers[activityId]; }
@@ -909,7 +875,7 @@
             Object.keys(activeTrailers).forEach(function(id) { activeTrailers[id].destroy(); });
         });
 
-        Diag.add('INIT', 'Plugin ready!');
+        Diag.add('INIT', 'Ready!');
     }
 
     if (window.appready) startPlugin();
