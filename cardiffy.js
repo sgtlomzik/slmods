@@ -1,14 +1,14 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '2.2.0';
+    var PLUGIN_VERSION = '2.3.0';
     var DEBUG = true;
     var LOG_PREFIX = 'Cardify';
 
     var CONFIG = {
-        AJAX_TIMEOUT: 5000,
-        ROOTU_TIMEOUT: 2000,
-        STREAM_TIMEOUT: 4000,
+        AJAX_TIMEOUT: 8000,
+        ROOTU_TIMEOUT: 3000,
+        STREAM_TIMEOUT: 6000,
         VIDEO_SKIP_SECONDS: 5,
         VIDEO_MIN_DURATION_FOR_SKIP: 10,
         MAX_TRAILER_DURATION: 300,
@@ -44,8 +44,7 @@
     var Diag = {
         results: [],
         add: function(category, message, data) {
-            var entry = { time: new Date().toLocaleTimeString(), cat: category, msg: message, data: data || null };
-            this.results.push(entry);
+            this.results.push({ time: new Date().toLocaleTimeString(), cat: category, msg: message, data: data || null });
             if (data) { log('[' + category + ']', message, data); } 
             else { log('[' + category + ']', message); }
         }
@@ -77,7 +76,7 @@
         var script = document.createElement('script');
         script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.4.12';
         script.onload = function() {
-            Diag.add('HLS.JS', 'Loaded', { supported: Hls.isSupported() });
+            Diag.add('HLS.JS', 'Loaded', { supported: typeof Hls !== 'undefined' && Hls.isSupported() });
             resolve(true);
         };
         script.onerror = function() {
@@ -184,61 +183,89 @@
         }
     };
 
-    // ==================== RUTUBE API (ИСПРАВЛЕННЫЙ) ====================
+    // ==================== RUTUBE API v3 - ИСПОЛЬЗУЕМ LAMPA NETWORK ====================
     var RutubeAPI = (function() {
         var rootuApi = Lampa.Utils.protocol() + 'trailer.rootu.top/search/';
         var searchProxy = '';
         
-        // Список CORS прокси для ротации
-        var corsProxies = [
-            'https://corsproxy.io/?',
-            'https://api.allorigins.win/raw?url=',
-            'https://cors-anywhere.herokuapp.com/',
-            'https://thingproxy.freeboard.io/fetch/'
-        ];
-        var currentProxyIndex = 0;
-        
-        function getNextProxy() {
-            var proxy = corsProxies[currentProxyIndex];
-            currentProxyIndex = (currentProxyIndex + 1) % corsProxies.length;
-            return proxy;
+        // Получаем прокси из настроек Lampa
+        function getLampaProxy() {
+            // Lampa использует свой прокси для обхода CORS
+            var proxy = Lampa.Storage.get('proxy_url') || Lampa.Storage.get('proxy');
+            if (proxy) return proxy;
+            
+            // Стандартные прокси Lampa
+            var protocol = Lampa.Utils.protocol();
+            return protocol + 'proxy.cub.watch/';
         }
         
-        // Метод 1: Через Lampa proxy (если доступен)
-        function tryLampaProxy(videoId, callback, groupId) {
-            var proxyUrl = Lampa.Utils.protocol() + 'proxy.cub.watch/rutube/' + videoId;
+        // Метод 1: Через Lampa.Network (встроенный механизм)
+        function tryLampaNetwork(videoId, callback, groupId) {
+            Diag.add('STREAM', 'Method 1: Lampa.Network');
             
-            Diag.add('STREAM', 'Trying Lampa proxy', { videoId: videoId });
-            
-            AjaxManager.request({
-                url: proxyUrl,
-                dataType: 'json',
-                timeout: CONFIG.STREAM_TIMEOUT,
-                success: function(data) {
-                    if (data && data.m3u8) {
-                        Diag.add('STREAM', 'Lampa proxy SUCCESS');
-                        callback({ m3u8: data.m3u8 });
-                    } else if (data && data.video_balancer && data.video_balancer.m3u8) {
-                        Diag.add('STREAM', 'Lampa proxy SUCCESS (v2)');
-                        callback({ m3u8: data.video_balancer.m3u8 });
-                    } else {
-                        Diag.add('STREAM', 'Lampa proxy no data');
-                        tryYandexProxy(videoId, callback, groupId);
-                    }
-                },
-                error: function() {
-                    Diag.add('STREAM', 'Lampa proxy failed');
-                    tryYandexProxy(videoId, callback, groupId);
-                }
-            }, groupId);
-        }
-        
-        // Метод 2: Через Yandex/CUB proxy
-        function tryYandexProxy(videoId, callback, groupId) {
             var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
-            var proxyUrl = Lampa.Utils.protocol() + 'cub.watch/api/proxy?url=' + encodeURIComponent(apiUrl);
             
-            Diag.add('STREAM', 'Trying CUB proxy');
+            // Используем Lampa.Network который умеет обходить CORS
+            if (typeof Lampa.Network !== 'undefined' && Lampa.Network.native) {
+                Lampa.Network.native(apiUrl, function(data) {
+                    try {
+                        var json = typeof data === 'string' ? JSON.parse(data) : data;
+                        if (json && json.video_balancer && json.video_balancer.m3u8) {
+                            Diag.add('STREAM', 'Lampa.Network SUCCESS!');
+                            callback({ m3u8: json.video_balancer.m3u8 });
+                            return;
+                        }
+                    } catch(e) {
+                        Diag.add('STREAM', 'Lampa.Network parse error', { error: e.message });
+                    }
+                    tryLampaRequest(videoId, callback, groupId);
+                }, function(error) {
+                    Diag.add('STREAM', 'Lampa.Network failed', { error: error });
+                    tryLampaRequest(videoId, callback, groupId);
+                }, false, { dataType: 'json' });
+            } else {
+                Diag.add('STREAM', 'Lampa.Network not available');
+                tryLampaRequest(videoId, callback, groupId);
+            }
+        }
+        
+        // Метод 2: Через Lampa.Reguest с прокси
+        function tryLampaRequest(videoId, callback, groupId) {
+            Diag.add('STREAM', 'Method 2: Lampa.Reguest');
+            
+            var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
+            
+            if (typeof Lampa.Reguest !== 'undefined') {
+                var network = new Lampa.Reguest();
+                network.timeout(CONFIG.STREAM_TIMEOUT);
+                
+                network.native(apiUrl, function(data) {
+                    try {
+                        var json = typeof data === 'string' ? JSON.parse(data) : data;
+                        if (json && json.video_balancer && json.video_balancer.m3u8) {
+                            Diag.add('STREAM', 'Lampa.Reguest SUCCESS!');
+                            callback({ m3u8: json.video_balancer.m3u8 });
+                            return;
+                        }
+                    } catch(e) {}
+                    tryServerProxy(videoId, callback, groupId);
+                }, function() {
+                    Diag.add('STREAM', 'Lampa.Reguest failed');
+                    tryServerProxy(videoId, callback, groupId);
+                });
+            } else {
+                Diag.add('STREAM', 'Lampa.Reguest not available');
+                tryServerProxy(videoId, callback, groupId);
+            }
+        }
+        
+        // Метод 3: Через серверный прокси Lampa
+        function tryServerProxy(videoId, callback, groupId) {
+            Diag.add('STREAM', 'Method 3: Server proxy');
+            
+            var proxy = getLampaProxy();
+            var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
+            var proxyUrl = proxy + 'v2/' + encodeURIComponent(apiUrl);
             
             AjaxManager.request({
                 url: proxyUrl,
@@ -246,93 +273,86 @@
                 timeout: CONFIG.STREAM_TIMEOUT,
                 success: function(data) {
                     if (data && data.video_balancer && data.video_balancer.m3u8) {
-                        Diag.add('STREAM', 'CUB proxy SUCCESS');
+                        Diag.add('STREAM', 'Server proxy SUCCESS!');
                         callback({ m3u8: data.video_balancer.m3u8 });
                     } else {
-                        Diag.add('STREAM', 'CUB proxy no data');
+                        tryRootuM3u8(videoId, callback, groupId);
+                    }
+                },
+                error: function() {
+                    Diag.add('STREAM', 'Server proxy failed');
+                    tryRootuM3u8(videoId, callback, groupId);
+                }
+            }, groupId);
+        }
+        
+        // Метод 4: Через rootu.top - у них может быть кэш m3u8
+        function tryRootuM3u8(videoId, callback, groupId) {
+            Diag.add('STREAM', 'Method 4: Rootu M3U8 cache');
+            
+            var url = Lampa.Utils.protocol() + 'trailer.rootu.top/m3u8/' + videoId + '.json';
+            
+            AjaxManager.request({
+                url: url,
+                dataType: 'json',
+                timeout: CONFIG.STREAM_TIMEOUT,
+                success: function(data) {
+                    if (data && data.m3u8) {
+                        Diag.add('STREAM', 'Rootu M3U8 SUCCESS!');
+                        callback({ m3u8: data.m3u8 });
+                    } else {
                         tryDirectEmbed(videoId, callback, groupId);
                     }
                 },
                 error: function() {
-                    Diag.add('STREAM', 'CUB proxy failed');
+                    Diag.add('STREAM', 'Rootu M3U8 failed');
                     tryDirectEmbed(videoId, callback, groupId);
                 }
             }, groupId);
         }
         
-        // Метод 3: Парсинг embed страницы
+        // Метод 5: Embed URL напрямую (некоторые ТВ поддерживают)
         function tryDirectEmbed(videoId, callback, groupId) {
-            var embedUrl = 'https://rutube.ru/play/embed/' + videoId;
-            var proxy = getNextProxy();
-            var proxyUrl = proxy + encodeURIComponent(embedUrl);
+            Diag.add('STREAM', 'Method 5: Direct embed test');
             
-            Diag.add('STREAM', 'Trying embed parse', { proxy: proxy.substring(0, 30) });
+            // Пробуем использовать известный формат m3u8 URL Rutube
+            // Rutube использует формат: https://bl.rutube.ru/route/{videoId}.m3u8
+            var possibleUrls = [
+                'https://bl.rutube.ru/route/' + videoId + '.m3u8',
+                'https://bl2.rutube.ru/route/' + videoId + '.m3u8'
+            ];
             
-            AjaxManager.request({
-                url: proxyUrl,
-                dataType: 'text',
-                timeout: CONFIG.STREAM_TIMEOUT,
-                success: function(html) {
-                    // Ищем m3u8 URL в HTML
-                    var m3u8Match = html.match(/["']([^"']*\.m3u8[^"']*?)["']/i);
-                    if (m3u8Match && m3u8Match[1]) {
-                        var m3u8Url = m3u8Match[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
-                        Diag.add('STREAM', 'Embed parse SUCCESS', { url: m3u8Url.substring(0, 50) });
-                        callback({ m3u8: m3u8Url });
-                        return;
-                    }
-                    
-                    // Ищем JSON с опциями
-                    var jsonMatch = html.match(/window\.Ya\.playerOptions\s*=\s*(\{[\s\S]*?\});/);
-                    if (jsonMatch) {
-                        try {
-                            var options = JSON.parse(jsonMatch[1]);
-                            if (options.video && options.video.m3u8) {
-                                Diag.add('STREAM', 'Embed JSON parse SUCCESS');
-                                callback({ m3u8: options.video.m3u8 });
-                                return;
-                            }
-                        } catch(e) {}
-                    }
-                    
-                    Diag.add('STREAM', 'Embed parse failed - no m3u8 found');
-                    tryRotatingProxy(videoId, callback, groupId, 0);
-                },
-                error: function() {
-                    Diag.add('STREAM', 'Embed request failed');
-                    tryRotatingProxy(videoId, callback, groupId, 0);
-                }
-            }, groupId);
+            tryM3u8Url(possibleUrls, 0, callback, groupId);
         }
         
-        // Метод 4: Ротация CORS прокси
-        function tryRotatingProxy(videoId, callback, groupId, attempt) {
-            if (attempt >= corsProxies.length) {
-                Diag.add('STREAM', 'All proxies failed');
+        function tryM3u8Url(urls, index, callback, groupId) {
+            if (index >= urls.length) {
+                Diag.add('STREAM', 'All methods exhausted');
                 callback(null);
                 return;
             }
             
-            var apiUrl = 'https://rutube.ru/api/play/options/' + videoId + '/?no_404=true&referer=&pver=v2';
-            var proxy = corsProxies[attempt];
-            var proxyUrl = proxy + encodeURIComponent(apiUrl);
+            var url = urls[index];
+            Diag.add('STREAM', 'Testing m3u8 URL', { url: url.substring(0, 50) });
             
-            Diag.add('STREAM', 'Trying proxy #' + (attempt + 1), { proxy: proxy.substring(0, 25) });
-            
+            // Проверяем доступность через HEAD запрос или пробуем напрямую
             AjaxManager.request({
-                url: proxyUrl,
-                dataType: 'json',
-                timeout: CONFIG.STREAM_TIMEOUT,
-                success: function(data) {
-                    if (data && data.video_balancer && data.video_balancer.m3u8) {
-                        Diag.add('STREAM', 'Proxy #' + (attempt + 1) + ' SUCCESS');
-                        callback({ m3u8: data.video_balancer.m3u8 });
-                    } else {
-                        tryRotatingProxy(videoId, callback, groupId, attempt + 1);
-                    }
+                url: url,
+                type: 'HEAD',
+                timeout: 3000,
+                success: function() {
+                    Diag.add('STREAM', 'Direct m3u8 accessible!');
+                    callback({ m3u8: url });
                 },
                 error: function() {
-                    tryRotatingProxy(videoId, callback, groupId, attempt + 1);
+                    // Даже если HEAD не работает, всё равно пробуем этот URL
+                    // Возможно ТВ сможет его открыть напрямую
+                    if (index === 0) {
+                        Diag.add('STREAM', 'Trying m3u8 anyway');
+                        callback({ m3u8: url, untested: true });
+                    } else {
+                        tryM3u8Url(urls, index + 1, callback, groupId);
+                    }
                 }
             }, groupId);
         }
@@ -340,7 +360,7 @@
         // Главная функция получения stream
         function getStreamUrl(videoId, callback, groupId) {
             Diag.add('STREAM', 'Getting stream', { videoId: videoId });
-            tryLampaProxy(videoId, callback, groupId);
+            tryLampaNetwork(videoId, callback, groupId);
         }
 
         function searchRootu(movie, isTv, callback, groupId) {
@@ -398,7 +418,7 @@
                 error: function(xhr) {
                     if (xhr.statusText === 'abort') { callback(null); return; }
                     if (!searchProxy && xhr.status === 0) {
-                        searchProxy = 'https://rutube-search.root-1a7.workers.dev/';
+                        searchProxy = Lampa.Utils.protocol() + 'rutube-search.root-1a7.workers.dev/';
                         Diag.add('SEARCH', 'Switching to search proxy');
                         searchRutube(movie, isTv, callback, groupId);
                         return;
@@ -433,14 +453,12 @@
                 pending--;
                 if (!completed && results.rootu && results.rootu.videoId) {
                     completed = true;
-                    Diag.add('SEARCH', 'Using rootu result');
                     fetchStreamAndReturn(results.rootu);
                     return;
                 }
                 if (pending === 0 && !completed) {
                     if (results.rutube && results.rutube.videoId) {
                         completed = true;
-                        Diag.add('SEARCH', 'Using rutube result');
                         fetchStreamAndReturn(results.rutube);
                     } else {
                         Diag.add('SEARCH', 'No trailer found');
@@ -454,8 +472,8 @@
                 TrailerCache.set(movie, { videoId: result.videoId, title: result.title });
                 getStreamUrl(result.videoId, function(stream) {
                     if (stream && stream.m3u8) {
-                        Diag.add('STREAM', 'Got m3u8!', { url: stream.m3u8.substring(0, 50) });
-                        callback({ videoId: result.videoId, m3u8: stream.m3u8 });
+                        Diag.add('STREAM', 'Got m3u8!', { url: stream.m3u8.substring(0, 60) });
+                        callback({ videoId: result.videoId, m3u8: stream.m3u8, untested: stream.untested });
                     } else { 
                         Diag.add('STREAM', 'Failed to get stream');
                         callback(null); 
@@ -524,7 +542,7 @@
         this.hls = null;
         this.groupId = Utils.generateId('trailer');
         
-        Diag.add('VIDEO', 'Creating player', { videoId: trailerData.videoId, hasM3u8: !!trailerData.m3u8 });
+        Diag.add('VIDEO', 'Creating player', { videoId: trailerData.videoId, hasM3u8: !!trailerData.m3u8, untested: trailerData.untested });
         
         this.$render = $(render);
         this.$background = this.$render.find('.full-start__background');
@@ -536,6 +554,7 @@
         this.videoElement.setAttribute('muted', '');
         this.videoElement.setAttribute('playsinline', '');
         this.videoElement.setAttribute('webkit-playsinline', '');
+        this.videoElement.setAttribute('crossorigin', 'anonymous');
         
         this.$background.after(this.$html);
         
@@ -580,11 +599,12 @@
         var nativeSupport = video.canPlayType('application/vnd.apple.mpegurl');
         Diag.add('VIDEO', 'Native HLS', { support: nativeSupport || 'none' });
         
+        // Vidaa поддерживает native HLS - пробуем сначала его
         if (nativeSupport && nativeSupport !== '') {
             Diag.add('VIDEO', 'Using NATIVE HLS');
             video.src = m3u8Url;
             this._setupVideoEvents();
-            setTimeout(function() { if (!self.destroyed) self._tryPlay(); }, 100);
+            setTimeout(function() { if (!self.destroyed) self._tryPlay(); }, 200);
             return;
         }
         
@@ -603,7 +623,11 @@
                     maxBufferLength: CONFIG.HLS_MAX_BUFFER,
                     maxMaxBufferLength: 30,
                     lowLatencyMode: true,
-                    backBufferLength: 0
+                    backBufferLength: 0,
+                    xhrSetup: function(xhr, url) {
+                        // Пробуем без credentials для CORS
+                        xhr.withCredentials = false;
+                    }
                 });
                 
                 self.hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
@@ -615,10 +639,13 @@
                     Diag.add('VIDEO', 'HLS error', { type: data.type, fatal: data.fatal, details: data.details });
                     if (data.fatal) {
                         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                            Diag.add('VIDEO', 'Network error - trying recovery');
                             self.hls.startLoad();
                         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                            Diag.add('VIDEO', 'Media error - trying recovery');
                             self.hls.recoverMediaError();
                         } else {
+                            Diag.add('VIDEO', 'Fatal error - destroying');
                             self.destroy();
                         }
                     }
@@ -628,10 +655,11 @@
                 self.hls.attachMedia(video);
                 self._setupVideoEvents();
             } else {
+                // Fallback - пробуем напрямую
                 Diag.add('VIDEO', 'Direct source fallback');
                 video.src = m3u8Url;
                 self._setupVideoEvents();
-                setTimeout(function() { if (!self.destroyed) self._tryPlay(); }, 100);
+                setTimeout(function() { if (!self.destroyed) self._tryPlay(); }, 200);
             }
         });
     };
@@ -655,7 +683,7 @@
     
     BackgroundTrailer.prototype._onMetadata = function() {
         if (this.destroyed) return;
-        Diag.add('VIDEO', 'Metadata', { 
+        Diag.add('VIDEO', 'Metadata loaded', { 
             duration: Math.round(this.videoElement.duration),
             size: this.videoElement.videoWidth + 'x' + this.videoElement.videoHeight
         });
@@ -668,23 +696,26 @@
     
     BackgroundTrailer.prototype._onCanPlay = function() {
         if (this.destroyed) return;
-        Diag.add('VIDEO', 'CanPlay', { readyState: this.videoElement.readyState });
+        Diag.add('VIDEO', 'CanPlay event');
         this._tryPlay();
     };
     
     BackgroundTrailer.prototype._onPlaying = function() {
         if (this.destroyed) return;
-        Diag.add('VIDEO', '>>> PLAYING! <<<');
+        Diag.add('VIDEO', '*** PLAYING! ***');
         this.$html.addClass('cardify-bg-video--visible');
         this.$background.addClass('cardify-bg-hidden');
     };
     
     BackgroundTrailer.prototype._onError = function(e) {
         var video = this.videoElement;
-        Diag.add('VIDEO', 'ERROR', {
+        var errorDetails = {
             code: video.error ? video.error.code : 'none',
-            message: video.error ? video.error.message : 'none'
-        });
+            message: video.error ? video.error.message : 'none',
+            networkState: video.networkState,
+            readyState: video.readyState
+        };
+        Diag.add('VIDEO', 'ERROR', errorDetails);
     };
     
     BackgroundTrailer.prototype._tryPlay = function() {
@@ -692,7 +723,7 @@
         var video = this.videoElement;
         if (!video || this.destroyed) return;
         
-        Diag.add('VIDEO', 'Trying play', { paused: video.paused, readyState: video.readyState });
+        Diag.add('VIDEO', 'Attempting play...', { paused: video.paused, readyState: video.readyState });
         
         video.muted = true;
         video.volume = 0;
@@ -703,13 +734,14 @@
                 Diag.add('VIDEO', 'Play SUCCESS');
             }).catch(function(error) {
                 Diag.add('VIDEO', 'Play FAILED', { name: error.name, message: error.message });
+                // Повторная попытка
                 setTimeout(function() {
                     if (self.destroyed) return;
                     video.muted = true;
                     video.play().catch(function(e) {
                         Diag.add('VIDEO', 'Retry FAILED', { message: e.message });
                     });
-                }, 500);
+                }, 1000);
             });
         }
     };
@@ -791,7 +823,15 @@
     var CARDIFY_CSS = '.cardify .full-start-new__body{height:80vh}.cardify .full-start-new__right{display:flex;align-items:flex-end}.cardify .full-start-new__title{text-shadow:0 0 10px rgba(0,0,0,0.8);font-size:5em!important;line-height:1.1!important;margin-bottom:0.15em;position:relative;z-index:2}.cardify .full-start-new__details{margin-bottom:0.5em;font-size:1.3em;opacity:0.9;text-shadow:0 1px 2px rgba(0,0,0,0.8);position:relative;z-index:2}.cardify .full-start-new__head{margin-bottom:0.3em;position:relative;z-index:2}.cardify img.full--logo,.cardify .full-start__title-img{max-height:24em!important;max-width:90%!important;height:auto!important;width:auto!important;object-fit:contain!important}.cardify__left{flex-grow:1;max-width:70%;position:relative;z-index:2}.cardify__right{display:flex;align-items:center;flex-shrink:0;position:relative;z-index:2}.cardify__background{left:0;transition:opacity 1s ease}.cardify__background.cardify-bg-hidden{opacity:0!important}.cardify .full-start-new__reactions{display:none!important}.cardify .full-start-new__rate-line{margin:0 0 0 1em;display:flex;align-items:center}.cardify-bg-video{position:absolute;top:-20%;left:0;right:0;bottom:-20%;z-index:0;opacity:0;transition:opacity 1.5s ease;overflow:hidden;pointer-events:none}.cardify-bg-video--visible{opacity:1}.cardify-bg-video__player{width:100%;height:100%;object-fit:cover;transition:transform 1s ease;will-change:transform;filter:brightness(0.85) saturate(1.1)}.cardify-bg-video__overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,rgba(0,0,0,0.95) 0%,rgba(0,0,0,0.5) 40%,transparent 100%),linear-gradient(to top,rgba(0,0,0,0.9) 0%,transparent 30%);pointer-events:none}.cardify-ratings-list{display:flex;gap:0.8em;align-items:center}.cardify-rate-item{display:flex;flex-direction:row;align-items:center;gap:0.4em;border:2px solid rgba(255,255,255,0.5);border-radius:6px;padding:0.4em 0.8em;background:transparent;color:#fff}.cardify-rate-icon{font-size:0.9em;opacity:0.8;font-weight:normal;margin:0}.cardify-rate-value{font-size:1.1em;font-weight:bold;color:#fff!important}.cardify-rate-item.reaction{border-color:rgba(255,255,255,0.5)}.cardify-original-titles{margin-bottom:1em;display:flex;flex-direction:column;gap:0.3em;position:relative;z-index:2}.cardify-original-titles__item{display:flex;align-items:center;gap:0.8em;font-size:1.4em;opacity:0.9}.cardify-original-titles__text{color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.8)}.cardify-original-titles__label{font-size:0.7em;padding:0.2em 0.5em;background:rgba(255,255,255,0.2);border-radius:0.3em;text-transform:uppercase}.cardify .original_title{display:none!important}';
 
     function startPlugin() {
-        Diag.add('INIT', 'Plugin starting', { version: PLUGIN_VERSION });
+        Diag.add('INIT', 'Starting', { version: PLUGIN_VERSION });
+        
+        // Проверяем доступные API Lampa
+        Diag.add('INIT', 'Lampa APIs', {
+            Network: typeof Lampa.Network !== 'undefined',
+            Reguest: typeof Lampa.Reguest !== 'undefined',
+            Utils: typeof Lampa.Utils !== 'undefined'
+        });
+        
         OriginalTitle.init();
 
         Lampa.Lang.add({
@@ -852,9 +892,9 @@
                     
                     RutubeAPI.findTrailer(movie, isTv, function(result) {
                         var elapsed = Date.now() - startTime;
-                        Diag.add('SEARCH', 'Completed in ' + elapsed + 'ms', { found: !!result });
+                        Diag.add('SEARCH', 'Completed', { ms: elapsed, found: !!result });
                         
-                        if (result && (result.m3u8 || result.videoId)) {
+                        if (result && result.m3u8) {
                             if (activeTrailers[activityId]) activeTrailers[activityId].destroy();
                             activeTrailers[activityId] = new BackgroundTrailer(render, result, function() { delete activeTrailers[activityId]; });
                         }
