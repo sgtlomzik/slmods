@@ -3,13 +3,13 @@
 
     /**
      * Cardify Free Plugin
-     * @version 1.6.0
+     * @version 1.7.0
      * 
      * Changelog:
-     * 1.6.0 - iTunes трейлер на фоне, логотип x1.5
+     * 1.7.0 - Rutube трейлеры, исправлен логотип
      * 1.3.0 - Базовая рабочая версия
      */
-    var PLUGIN_VERSION = '1.6.0';
+    var PLUGIN_VERSION = '1.7.0';
 
     var DEBUG = true;
     
@@ -23,203 +23,246 @@
 
     log('Загрузка плагина...');
 
-    // ==================== ITUNES TRAILER ====================
-    var iTunesTrailer = (function() {
-        
+    // ==================== RUTUBE TRAILER ====================
+    var RutubeTrailer = (function() {
+        var rootuTrailerApi = Lampa.Utils.protocol() + 'trailer.rootu.top/search/';
+        var proxy = '';
+
+        function cleanString(str) {
+            return str.replace(/[^a-zA-Z\dа-яА-ЯёЁ]+/g, ' ').trim().toLowerCase();
+        }
+
         function search(movie, isTv, callback) {
-            var title = movie.original_title || movie.original_name || movie.title || movie.name || '';
+            var title = movie.title || movie.name || movie.original_title || movie.original_name || '';
             
-            log('iTunes: начинаем поиск');
-            log('iTunes: название =', title);
-            log('iTunes: тип =', isTv ? 'tvShow' : 'movie');
+            log('Rutube: начинаем поиск');
+            log('Rutube: название =', title);
             
-            if (!title || !/[a-z]{2}/i.test(title)) {
-                log('iTunes: название не подходит для поиска');
+            if (!title || title.length < 2) {
+                log('Rutube: слишком короткое название');
                 callback(null);
                 return;
             }
-            
+
             var year = (movie.release_date || movie.first_air_date || '').substring(0, 4);
-            log('iTunes: год =', year);
+            var cleanSearch = cleanString(title);
+            var query = cleanString([title, year, 'русский трейлер', isTv ? 'сезон 1' : ''].join(' '));
             
-            // Проверяем кэш
-            var cacheKey = 'cardify_itunes_' + movie.id;
+            log('Rutube: год =', year);
+            log('Rutube: запрос =', query);
+
+            // Кэш
+            var cacheKey = 'cardify_rutube_' + movie.id;
             var cached = sessionStorage.getItem(cacheKey);
             if (cached) {
-                log('iTunes: найден кэш');
+                log('Rutube: найден кэш');
                 var data = JSON.parse(cached);
-                if (data && data.url) {
-                    log('iTunes: из кэша URL =', data.url);
+                if (data && data.videoId) {
+                    log('Rutube: из кэша videoId =', data.videoId);
                     callback(data);
                 } else {
-                    log('iTunes: в кэше пусто');
+                    log('Rutube: в кэше пусто');
                     callback(null);
                 }
                 return;
             }
+
+            var tmdbId = movie.id ? ('000000' + movie.id) : '';
+            if (tmdbId.length > 7) tmdbId = tmdbId.slice(-Math.max(7, (movie.id + '').length));
+            var type = isTv ? 'tv' : 'movie';
+
+            // Сначала пробуем trailer.rootu.top
+            if (tmdbId && /^\d+$/.test(tmdbId)) {
+                var rootuUrl = rootuTrailerApi + type + '/' + tmdbId + '.json';
+                log('Rutube: пробуем rootu.top:', rootuUrl);
+
+                $.ajax({
+                    url: rootuUrl,
+                    dataType: 'json',
+                    timeout: 3000,
+                    success: function(data) {
+                        log('Rutube: rootu.top ответ:', data);
+                        if (data && data.length && data[0].url) {
+                            var videoId = extractVideoId(data[0].url);
+                            if (videoId) {
+                                var result = {
+                                    title: data[0].title,
+                                    videoId: videoId,
+                                    thumbnail: data[0].thumbnail_url
+                                };
+                                log('Rutube: rootu.top найден videoId =', videoId);
+                                sessionStorage.setItem(cacheKey, JSON.stringify(result));
+                                callback(result);
+                                return;
+                            }
+                        }
+                        log('Rutube: rootu.top пусто, идём в Rutube API');
+                        searchRutubeApi(query, cleanSearch, year, cacheKey, callback);
+                    },
+                    error: function() {
+                        log('Rutube: rootu.top ошибка, идём в Rutube API');
+                        searchRutubeApi(query, cleanSearch, year, cacheKey, callback);
+                    }
+                });
+            } else {
+                searchRutubeApi(query, cleanSearch, year, cacheKey, callback);
+            }
+        }
+
+        function extractVideoId(url) {
+            var m = url.match(/rutube\.ru\/(play\/embed|video\/private|video|shorts)\/([\da-f]{32,})/i);
+            return m ? m[2] : null;
+        }
+
+        function searchRutubeApi(query, cleanSearch, year, cacheKey, callback) {
+            var url = (proxy || '') + 'https://rutube.ru/api/search/video/?query=' + 
+                encodeURIComponent(query) + '&format=json';
             
-            var url = 'https://itunes.apple.com/search' +
-                '?term=' + encodeURIComponent(title).replace(/%20/g, '+') +
-                '&media=' + (isTv ? 'tvShow' : 'movie') +
-                '&limit=15';
-            
-            log('iTunes: запрос =', url);
-            
+            log('Rutube: API запрос:', url);
+
             $.ajax({
                 url: url,
                 dataType: 'json',
-                timeout: 15000,
-                success: function(response) {
-                    log('iTunes: получен ответ');
-                    log('iTunes: resultCount =', response?.resultCount);
+                timeout: 10000,
+                success: function(data) {
+                    log('Rutube: API ответ, results:', data?.results?.length);
                     
-                    if (!response || !response.results || !response.results.length) {
-                        log('iTunes: результатов нет');
-                        sessionStorage.setItem(cacheKey, JSON.stringify({ url: null }));
+                    if (!data || !data.results || !data.results.length) {
+                        log('Rutube: результатов нет');
+                        sessionStorage.setItem(cacheKey, JSON.stringify({ videoId: null }));
                         callback(null);
                         return;
                     }
-                    
-                    log('iTunes: всего результатов =', response.results.length);
+
+                    var queryWords = query.split(' ');
                     
                     // Ищем подходящий трейлер
                     var found = null;
-                    for (var i = 0; i < response.results.length; i++) {
-                        var r = response.results[i];
+                    for (var i = 0; i < data.results.length; i++) {
+                        var r = data.results[i];
+                        var rTitle = cleanString(r.title || '');
                         
-                        log('iTunes: [' + i + '] trackName =', r.trackName);
-                        log('iTunes: [' + i + '] previewUrl =', r.previewUrl ? 'есть' : 'нет');
-                        log('iTunes: [' + i + '] releaseDate =', r.releaseDate);
+                        log('Rutube: [' + i + '] title =', r.title);
+                        log('Rutube: [' + i + '] embed_url =', r.embed_url ? 'есть' : 'нет');
+                        log('Rutube: [' + i + '] duration =', r.duration);
                         
-                        if (!r.previewUrl) {
-                            log('iTunes: [' + i + '] пропускаем - нет previewUrl');
+                        if (!r.embed_url) {
+                            log('Rutube: [' + i + '] пропуск - нет embed_url');
                             continue;
                         }
                         
-                        // Проверяем год
-                        if (year && r.releaseDate) {
-                            var resultYear = r.releaseDate.substring(0, 4);
-                            if (resultYear !== year && Math.abs(parseInt(resultYear) - parseInt(year)) > 1) {
-                                log('iTunes: [' + i + '] пропускаем - год не совпадает (' + resultYear + ' vs ' + year + ')');
-                                continue;
-                            }
+                        // Проверяем что это трейлер
+                        var isTrailer = rTitle.indexOf('трейлер') >= 0 || 
+                                       rTitle.indexOf('trailer') >= 0 || 
+                                       rTitle.indexOf('тизер') >= 0 ||
+                                       rTitle.indexOf('тайзер') >= 0;
+                        if (!isTrailer) {
+                            log('Rutube: [' + i + '] пропуск - не трейлер');
+                            continue;
                         }
                         
-                        found = {
-                            title: r.trackName || r.collectionName || title,
-                            url: r.previewUrl,
-                            artwork: r.artworkUrl100 ? r.artworkUrl100.replace('100x100', '600x600') : null
-                        };
-                        log('iTunes: [' + i + '] ВЫБРАН!');
-                        break;
+                        // Проверяем длительность (< 5 минут)
+                        if (r.duration && r.duration > 300) {
+                            log('Rutube: [' + i + '] пропуск - слишком длинный');
+                            continue;
+                        }
+                        
+                        // Проверяем что название содержит искомое
+                        if (rTitle.indexOf(cleanSearch) < 0) {
+                            log('Rutube: [' + i + '] пропуск - не содержит название фильма');
+                            continue;
+                        }
+                        
+                        // Проверяем флаги
+                        if (r.is_hidden || r.is_deleted || r.is_locked || r.is_adult) {
+                            log('Rutube: [' + i + '] пропуск - скрыт/удалён/заблокирован');
+                            continue;
+                        }
+                        
+                        var videoId = extractVideoId(r.embed_url || r.video_url);
+                        if (videoId) {
+                            found = {
+                                title: r.title,
+                                videoId: videoId,
+                                thumbnail: r.thumbnail_url
+                            };
+                            log('Rutube: [' + i + '] ВЫБРАН! videoId =', videoId);
+                            break;
+                        }
                     }
-                    
+
                     if (found) {
-                        log('iTunes: найден трейлер');
-                        log('iTunes: title =', found.title);
-                        log('iTunes: url =', found.url);
                         sessionStorage.setItem(cacheKey, JSON.stringify(found));
                         callback(found);
                     } else {
-                        log('iTunes: подходящий трейлер не найден');
-                        sessionStorage.setItem(cacheKey, JSON.stringify({ url: null }));
+                        log('Rutube: подходящий трейлер не найден');
+                        sessionStorage.setItem(cacheKey, JSON.stringify({ videoId: null }));
                         callback(null);
                     }
                 },
                 error: function(xhr, status, error) {
-                    log('iTunes: ОШИБКА запроса');
-                    log('iTunes: status =', status);
-                    log('iTunes: error =', error);
-                    log('iTunes: xhr.status =', xhr.status);
-                    sessionStorage.setItem(cacheKey, JSON.stringify({ url: null }));
+                    log('Rutube: API ошибка:', status, error);
+                    
+                    // Пробуем прокси
+                    if (!proxy && xhr.status === 0) {
+                        proxy = 'https://rutube-search.root-1a7.workers.dev/';
+                        log('Rutube: пробуем через прокси');
+                        searchRutubeApi(query, cleanSearch, year, cacheKey, callback);
+                        return;
+                    }
+                    
+                    sessionStorage.setItem(cacheKey, JSON.stringify({ videoId: null }));
                     callback(null);
                 }
             });
         }
-        
+
         return { search: search };
     })();
 
-    // ==================== BACKGROUND TRAILER ====================
+    // ==================== BACKGROUND TRAILER (iframe) ====================
     var BackgroundTrailer = function(render, video, onDestroy) {
         var self = this;
         this.destroyed = false;
         
         log('BackgroundTrailer: создаём');
-        log('BackgroundTrailer: url =', video.url);
+        log('BackgroundTrailer: videoId =', video.videoId);
         
         this.background = render.find('.full-start__background');
         
-        // Создаём контейнер для видео
+        // Создаём iframe для Rutube
+        var embedUrl = 'https://rutube.ru/play/embed/' + video.videoId + 
+            '?skinColor=000000&autoplay=1&muted=1&loop=1&controls=0';
+        
+        log('BackgroundTrailer: embedUrl =', embedUrl);
+        
         this.html = $('\
             <div class="cardify-bg-video">\
-                <video class="cardify-bg-video__player" playsinline muted loop></video>\
+                <iframe class="cardify-bg-video__player" \
+                    src="' + embedUrl + '" \
+                    frameborder="0" \
+                    allow="autoplay; encrypted-media" \
+                    allowfullscreen></iframe>\
                 <div class="cardify-bg-video__overlay"></div>\
             </div>\
         ');
         
-        this.videoElement = this.html.find('video')[0];
-        
         // Вставляем после фона
         this.background.after(this.html);
         
-        log('BackgroundTrailer: элемент создан, загружаем видео...');
-        
-        // Загружаем видео
-        this.videoElement.src = video.url;
-        
-        $(this.videoElement).on('loadeddata', function() {
+        // Показываем с задержкой (даём время загрузиться)
+        setTimeout(function() {
             if (self.destroyed) return;
-            log('BackgroundTrailer: loadeddata - видео загружено');
-        });
-        
-        $(this.videoElement).on('canplay', function() {
-            if (self.destroyed) return;
-            log('BackgroundTrailer: canplay - можно воспроизводить');
-            
-            // Плавно показываем видео
+            log('BackgroundTrailer: показываем');
             self.html.addClass('cardify-bg-video--visible');
-            
-            // Запускаем воспроизведение
-            var playPromise = self.videoElement.play();
-            if (playPromise !== undefined) {
-                playPromise.then(function() {
-                    log('BackgroundTrailer: воспроизведение началось!');
-                    // Скрываем статичный фон
-                    self.background.addClass('cardify-bg-hidden');
-                }).catch(function(e) {
-                    log('BackgroundTrailer: ОШИБКА воспроизведения:', e.message);
-                });
-            }
-        });
-        
-        $(this.videoElement).on('playing', function() {
-            log('BackgroundTrailer: playing - видео играет');
-        });
-        
-        $(this.videoElement).on('error', function(e) {
-            log('BackgroundTrailer: ОШИБКА загрузки видео');
-            log('BackgroundTrailer: error =', self.videoElement.error);
-            self.destroy();
-        });
-        
-        $(this.videoElement).on('stalled', function() {
-            log('BackgroundTrailer: stalled - загрузка застопорилась');
-        });
-        
-        $(this.videoElement).on('waiting', function() {
-            log('BackgroundTrailer: waiting - ожидание данных');
-        });
+            self.background.addClass('cardify-bg-hidden');
+        }, 2000);
         
         this.destroy = function() {
             if (this.destroyed) return;
             log('BackgroundTrailer: уничтожаем');
             this.destroyed = true;
             this.background.removeClass('cardify-bg-hidden');
-            try {
-                this.videoElement.pause();
-                this.videoElement.src = '';
-            } catch(e) {}
             this.html.remove();
             if (typeof onDestroy === 'function') onDestroy();
         };
@@ -298,9 +341,7 @@
 
                     titleCache[card.id] = { ru: ru, en: en, translit: translit, timestamp: now };
                     Lampa.Storage.set(storageKey, titleCache);
-                } catch (e) {
-                    log('OriginalTitle: ошибка загрузки:', e);
-                }
+                } catch (e) {}
             }
 
             return { original: orig, ru: ru, en: en, translit: translit };
@@ -312,23 +353,16 @@
             var lang = Lampa.Storage.get("language") || 'ru';
             var items = [];
             
-            if (titles.original) {
-                items.push({ title: titles.original, label: 'Original' });
-            }
-            
+            if (titles.original) items.push({ title: titles.original, label: 'Original' });
             if (titles.translit && titles.translit !== titles.original && titles.translit !== titles.en) {
                 items.push({ title: titles.translit, label: 'Translit' });
             }
-            
             if (titles.en && lang !== 'en' && titles.en !== titles.original) {
                 items.push({ title: titles.en, label: 'EN' });
             }
-            
-            if (titles.ru && lang !== 'ru') {
-                items.push({ title: titles.ru, label: 'RU' });
-            }
+            if (titles.ru && lang !== 'ru') items.push({ title: titles.ru, label: 'RU' });
 
-            if (items.length === 0) return;
+            if (!items.length) return;
 
             var html = '<div class="cardify-original-titles">';
             items.forEach(function(item) {
@@ -340,11 +374,8 @@
             html += '</div>';
 
             var details = container.find('.full-start-new__details');
-            if (details.length) {
-                details.after(html);
-            } else {
-                container.find('.full-start-new__title').after(html);
-            }
+            if (details.length) details.after(html);
+            else container.find('.full-start-new__title').after(html);
         }
 
         return { init: cleanOldCache, fetch: fetchTitles, render: render };
@@ -357,11 +388,8 @@
         OriginalTitle.init();
 
         Lampa.Lang.add({
-            cardify_enable_sound: {
-                ru: 'Включить звук', en: 'Enable sound', uk: 'Увімкнути звук'
-            },
             cardify_enable_trailer: {
-                ru: 'Фоновый трейлер', en: 'Background trailer', uk: 'Фоновий трейлер'
+                ru: 'Фоновый трейлер (Rutube)', en: 'Background trailer (Rutube)', uk: 'Фоновий трейлер (Rutube)'
             },
             cardify_show_original_title: {
                 ru: 'Оригинальное название', en: 'Original title', uk: 'Оригінальна назва'
@@ -403,13 +431,7 @@
                         </svg>\
                         <span>#{title_reactions}</span>\
                     </div>\
-                    <div class="full-start__button selector button--subscribe hide">\
-                        <svg width="25" height="30" viewBox="0 0 25 30" fill="none" xmlns="http://www.w3.org/2000/svg">\
-                            <path d="M6.02 24C6.27 27.36 9.08 30 12.5 30C15.92 30 18.73 27.36 18.98 24H15.96C15.72 25.7 14.26 27 12.5 27C10.74 27 9.28 25.7 9.04 24H6.02Z" fill="currentColor"/>\
-                            <path d="M3.82 14.6V10.27C3.82 5.41 7.72 1.5 12.5 1.5C17.28 1.5 21.18 5.41 21.18 10.27V14.6C21.18 15.85 21.54 17.07 22.22 18.12L23.07 19.45C24.21 21.21 22.94 23.5 20.91 23.5H4.09C2.06 23.5 0.79 21.21 1.93 19.45L2.78 18.12C3.46 17.07 3.82 15.85 3.82 14.6Z" stroke="currentColor" stroke-width="2.5"/>\
-                        </svg>\
-                        <span>#{title_subscribe}</span>\
-                    </div>\
+                    <div class="full-start__button selector button--subscribe hide"></div>\
                     <div class="full-start__button selector button--options">\
                         <svg width="38" height="10" viewBox="0 0 38 10" fill="none" xmlns="http://www.w3.org/2000/svg">\
                             <circle cx="4.89" cy="4.99" r="4.75" fill="currentColor"/>\
@@ -420,9 +442,7 @@
                 </div>\
             </div>\
             <div class="cardify__right">\
-                <div class="full-start-new__reactions selector">\
-                    <div>#{reactions_none}</div>\
-                </div>\
+                <div class="full-start-new__reactions selector"><div>#{reactions_none}</div></div>\
                 <div class="full-start-new__rate-line">\
                     <div class="full-start__pg hide"></div>\
                     <div class="full-start__status hide"></div>\
@@ -436,9 +456,8 @@
     </div>\
 </div>');
 
-        // CSS СТИЛИ
+        // CSS
         var style = $('<style id="cardify-css">\
-            /* === CARDIFY MAIN === */\
             .cardify{transition:all .3s}\
             .cardify .full-start-new__body{height:80vh}\
             .cardify .full-start-new__right{display:flex;align-items:flex-end}\
@@ -448,17 +467,6 @@
                 font-size:5em !important;\
                 line-height:1.1 !important;\
                 margin-bottom:0.15em\
-            }\
-            /* ЛОГОТИП x1.5 = 36em */\
-            .cardify .full-start-new__title img,\
-            .cardify .full-start-new__head img,\
-            .cardify img.full--logo,\
-            .cardify .full-start__title-img{\
-                max-height:36em !important;\
-                max-width:90% !important;\
-                height:auto !important;\
-                width:auto !important;\
-                object-fit:contain !important;\
             }\
             .cardify .full-start-new__details{\
                 margin-bottom:0.5em;\
@@ -472,82 +480,50 @@
             .cardify .full-start-new__reactions:not(.focus)>div:not(:first-child){display:none}\
             .cardify .full-start-new__rate-line{margin:0;margin-left:3.5em}\
             \
-            /* === BACKGROUND === */\
             .cardify__background{left:0;transition:opacity 1s ease}\
             .cardify__background.cardify-bg-hidden{opacity:0 !important}\
             body:not(.menu--open) .cardify__background{mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%)}\
             \
-            /* === BACKGROUND VIDEO === */\
             .cardify-bg-video{\
                 position:absolute;\
-                top:0;left:0;right:0;bottom:0;\
+                top:-10%;left:0;right:0;bottom:-10%;\
                 z-index:0;\
                 opacity:0;\
                 transition:opacity 1.5s ease;\
                 overflow:hidden;\
+                pointer-events:none;\
             }\
-            .cardify-bg-video--visible{\
-                opacity:1;\
-            }\
+            .cardify-bg-video--visible{opacity:1}\
             .cardify-bg-video__player{\
                 width:100%;\
                 height:100%;\
-                object-fit:cover;\
+                border:0;\
+                pointer-events:none;\
             }\
             .cardify-bg-video__overlay{\
                 position:absolute;\
                 top:0;left:0;right:0;bottom:0;\
-                background:linear-gradient(to top, \
-                    rgba(0,0,0,0.95) 0%, \
-                    rgba(0,0,0,0.4) 40%, \
-                    rgba(0,0,0,0.3) 60%,\
-                    rgba(0,0,0,0.5) 100%\
-                );\
+                background:linear-gradient(to top,rgba(0,0,0,0.95) 0%,rgba(0,0,0,0.4) 40%,rgba(0,0,0,0.3) 60%,rgba(0,0,0,0.5) 100%);\
+                pointer-events:none;\
             }\
             body:not(.menu--open) .cardify-bg-video{\
                 mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%);\
             }\
             \
-            /* === ORIGINAL TITLES === */\
-            .cardify-original-titles{\
-                margin-bottom:1em;\
-                display:flex;\
-                flex-direction:column;\
-                gap:0.3em;\
-            }\
-            .cardify-original-titles__item{\
-                display:flex;\
-                align-items:center;\
-                gap:0.8em;\
-                font-size:1.4em;\
-                opacity:0.85;\
-            }\
-            .cardify-original-titles__text{\
-                color:#fff;\
-                text-shadow:0 1px 3px rgba(0,0,0,0.5);\
-            }\
-            .cardify-original-titles__label{\
-                font-size:0.7em;\
-                padding:0.2em 0.5em;\
-                background:rgba(255,255,255,0.15);\
-                border-radius:0.3em;\
-                text-transform:uppercase;\
-                letter-spacing:0.05em;\
-                opacity:0.7;\
-            }\
+            .cardify-original-titles{margin-bottom:1em;display:flex;flex-direction:column;gap:0.3em}\
+            .cardify-original-titles__item{display:flex;align-items:center;gap:0.8em;font-size:1.4em;opacity:0.85}\
+            .cardify-original-titles__text{color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.5)}\
+            .cardify-original-titles__label{font-size:0.7em;padding:0.2em 0.5em;background:rgba(255,255,255,0.15);border-radius:0.3em;text-transform:uppercase;letter-spacing:0.05em;opacity:0.7}\
             \
-            /* === OTHER === */\
             .cardify .original_title{display:none !important}\
         </style>');
         
         $('head').append(style);
 
         // Настройки
-        var icon = '<svg width="36" height="28" viewBox="0 0 36 28" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1.5" y="1.5" width="33" height="25" rx="3.5" stroke="white" stroke-width="3"/><rect x="5" y="14" width="17" height="4" rx="2" fill="white"/><rect x="5" y="20" width="10" height="3" rx="1.5" fill="white"/><rect x="25" y="20" width="6" height="3" rx="1.5" fill="white"/></svg>';
-
         Lampa.SettingsApi.addComponent({
             component: 'cardify',
-            icon: icon,
+            icon: '<svg width="36" height="28" viewBox="0 0 36 28" fill="none"><rect x="1.5" y="1.5" width="33" height="25" rx="3.5" stroke="white" stroke-width="3"/></svg>',
             name: 'Cardify v' + PLUGIN_VERSION
         });
 
@@ -563,10 +539,45 @@
             field: { name: Lampa.Lang.translate('cardify_show_original_title') }
         });
 
-        // Хранилище активных трейлеров
         var activeTrailers = {};
 
-        // Основной слушатель
+        // Функция для увеличения логотипа через JS
+        function enlargeLogo(render) {
+            setTimeout(function() {
+                var logoSelectors = [
+                    '.full-start-new__title img',
+                    '.full-start-new__head img', 
+                    '.full-start__title-img',
+                    'img.full--logo'
+                ];
+                
+                logoSelectors.forEach(function(selector) {
+                    var imgs = render.find(selector);
+                    if (imgs.length) {
+                        log('Увеличиваем логотип:', selector, imgs.length, 'шт');
+                        imgs.each(function() {
+                            $(this).css({
+                                'max-height': '18em',
+                                'min-height': '8em',
+                                'height': 'auto',
+                                'width': 'auto',
+                                'max-width': '85%',
+                                'object-fit': 'contain'
+                            });
+                        });
+                    }
+                });
+            }, 200);
+            
+            // Повторяем через секунду на случай если логотип загрузится позже
+            setTimeout(function() {
+                render.find('.full-start-new__title img, .full-start-new__head img').css({
+                    'max-height': '18em',
+                    'min-height': '8em'
+                });
+            }, 1000);
+        }
+
         Lampa.Listener.follow('full', function(e) {
             if (e.type == 'complite') {
                 log('=== Full complite ===');
@@ -576,29 +587,28 @@
                 
                 render.find('.full-start__background').addClass('cardify__background');
 
-                // === ОРИГИНАЛЬНЫЕ НАЗВАНИЯ ===
+                // Увеличиваем логотип
+                enlargeLogo(render);
+
+                // Оригинальные названия
                 if (Lampa.Storage.field('cardify_show_original_title') !== false && e.data.movie) {
-                    var cardifyLeft = render.find('.cardify__left');
-                    
                     OriginalTitle.fetch(e.data.movie).then(function(titles) {
-                        OriginalTitle.render(cardifyLeft, titles);
+                        OriginalTitle.render(render.find('.cardify__left'), titles);
                     });
                 }
 
-                // === ФОНОВЫЙ ТРЕЙЛЕР ===
+                // Фоновый трейлер Rutube
                 if (Lampa.Storage.field('cardify_run_trailers') !== false && e.data.movie) {
-                    log('Трейлеры включены, ищем...');
+                    log('Трейлеры включены, ищем в Rutube...');
                     
                     var isTv = !!(e.object.method && e.object.method === 'tv');
                     
-                    iTunesTrailer.search(e.data.movie, isTv, function(video) {
-                        if (video && video.url) {
+                    RutubeTrailer.search(e.data.movie, isTv, function(video) {
+                        if (video && video.videoId) {
                             log('Трейлер найден, создаём BackgroundTrailer');
                             
-                            // Удаляем старый если есть
                             if (activeTrailers[activityId]) {
                                 activeTrailers[activityId].destroy();
-                                delete activeTrailers[activityId];
                             }
                             
                             activeTrailers[activityId] = new BackgroundTrailer(render, video, function() {
@@ -608,16 +618,12 @@
                             log('Трейлер НЕ найден');
                         }
                     });
-                } else {
-                    log('Трейлеры отключены или нет данных о фильме');
                 }
             }
             
-            // Уничтожаем трейлер при выходе
             if (e.type == 'destroy') {
                 var activityId = e.object.activity.id || 0;
                 if (activeTrailers[activityId]) {
-                    log('Уничтожаем трейлер при destroy');
                     activeTrailers[activityId].destroy();
                     delete activeTrailers[activityId];
                 }
