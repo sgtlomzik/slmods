@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_VERSION = '1.9.2'; 
+    var PLUGIN_VERSION = '1.9.3'; // FIX: Вернул шаблон карточки
     var DEBUG = true;
     
     // ==================== HLS.JS LOADER ====================
@@ -162,22 +162,12 @@
         this.updateScale = function() {
             if (self.destroyed) return;
             var video = self.videoElement;
-            
-            // Соотношение сторон экрана (1.77 для 16:9, 2.33 для 21:9)
             var screenRatio = window.innerWidth / window.innerHeight;
-            
-            // Базовый скейл. 
-            // Если экран 16:9 (1.77), мы делаем зум 1.35, чтобы убрать полосы у фильмов 2.35:1
-            // Если экран шире (Ultrawide), зум нужно уменьшать, иначе обрежем головы.
             var scale = 1.35; 
             
             if (screenRatio > 1.8) {
-                // Для Ultrawide мониторов и телефонов уменьшаем зум
-                // Чем шире экран, тем ближе к 1.0 должен быть скейл
                 scale = Math.max(1.1, 1.35 - (screenRatio - 1.77));
             }
-            
-            log('BackgroundTrailer: ScreenRatio:', screenRatio.toFixed(2), 'Applied Scale:', scale.toFixed(2));
             video.style.transform = 'scale(' + scale + ')';
         };
 
@@ -211,12 +201,7 @@
             var self = this;
             
             video.addEventListener('loadedmetadata', function() {
-                // Пропуск 5 секунд
-                if (video.duration > 10) {
-                    log('BackgroundTrailer: skip intro (5s)');
-                    video.currentTime = 5;
-                }
-                // Расчет зума при получении метаданных
+                if (video.duration > 10) video.currentTime = 5;
                 self.updateScale();
             });
 
@@ -250,16 +235,44 @@
         var CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
         var titleCache = Lampa.Storage.get(storageKey) || {};
 
-        function cleanOldCache() { /* Clean logic omitted for brevity, same as before */ }
+        function cleanOldCache() { 
+            var now = Date.now();
+            var changed = false;
+            for (var id in titleCache) {
+                if (now - titleCache[id].timestamp > CACHE_TTL) { delete titleCache[id]; changed = true; }
+            }
+            if (changed) Lampa.Storage.set(storageKey, titleCache);
+        }
 
         async function fetchTitles(card) {
-            // Same logic as before
             var orig = card.original_title || card.original_name || '';
             var alt = card.alternative_titles?.titles || card.alternative_titles?.results || [];
             var translitObj = alt.find(function(t) { return t.type === "Transliteration" || t.type === "romaji"; });
             var translit = translitObj?.title || translitObj?.data?.title || translitObj?.data?.name || "";
             var ru = alt.find(function(t) { return t.iso_3166_1 === "RU"; })?.title;
             var en = alt.find(function(t) { return t.iso_3166_1 === "US"; })?.title;
+
+            var now = Date.now();
+            var cache = titleCache[card.id];
+            if (cache && now - cache.timestamp < CACHE_TTL) {
+                ru = ru || cache.ru; en = en || cache.en; translit = translit || cache.translit;
+            }
+
+            if (!ru || !en || !translit) {
+                try {
+                    var type = card.first_air_date ? "tv" : "movie";
+                    var data = await new Promise(function(res, rej) {
+                        Lampa.Api.sources.tmdb.get(type + "/" + card.id + "?append_to_response=translations", {}, res, rej);
+                    });
+                    var tr = data.translations?.translations || [];
+                    var translitData = tr.find(function(t) { return t.type === "Transliteration" || t.type === "romaji"; });
+                    translit = translitData?.title || translitData?.data?.title || translitData?.data?.name || translit;
+                    if (!ru) { var ruData = tr.find(function(t) { return t.iso_3166_1 === "RU" || t.iso_639_1 === "ru"; }); ru = ruData?.data?.title || ruData?.data?.name; }
+                    if (!en) { var enData = tr.find(function(t) { return t.iso_3166_1 === "US" || t.iso_639_1 === "en"; }); en = enData?.data?.title || enData?.data?.name; }
+                    titleCache[card.id] = { ru: ru, en: en, translit: translit, timestamp: now };
+                    Lampa.Storage.set(storageKey, titleCache);
+                } catch (e) {}
+            }
             return { original: orig, ru: ru, en: en, translit: translit };
         }
 
@@ -267,7 +280,7 @@
             container.find('.cardify-original-titles').remove();
             var items = [];
             if (titles.original) items.push({ title: titles.original, label: 'Original' });
-            // ... rendering logic same as before ...
+            if (titles.translit && titles.translit !== titles.original && titles.translit !== titles.en) items.push({ title: titles.translit, label: 'Translit' });
             if (!items.length) return;
             var html = '<div class="cardify-original-titles">';
             items.forEach(function(item) { html += '<div class="cardify-original-titles__item"><span class="cardify-original-titles__text">' + item.title + '</span><span class="cardify-original-titles__label">' + item.label + '</span></div>'; });
@@ -282,18 +295,31 @@
     // ==================== PLUGIN START ====================
     function startPlugin() {
         log('Инициализация...');
-        
-        // CSS UPDATED:
-        // 1. New Overlay Gradient (Left-to-Right + Bottom-to-Top)
-        // 2. Video Filter (Brightness) for background feel
-        // 3. Smooth transitions
+        OriginalTitle.init();
+
+        Lampa.Lang.add({
+            cardify_enable_sound: { ru: 'Включить звук', en: 'Enable sound', uk: 'Увімкнути звук' },
+            cardify_enable_trailer: { ru: 'Фоновый трейлер', en: 'Background trailer', uk: 'Фоновий трейлер' },
+            cardify_show_original_title: { ru: 'Оригинальное название', en: 'Original title', uk: 'Оригінальна назва' }
+        });
+
+        // ВОТ ОН - ВЕРНУЛСЯ НА МЕСТО!
+        Lampa.Template.add('full_start_new', '<div class="full-start-new cardify"><div class="full-start-new__body"><div class="full-start-new__left hide"><div class="full-start-new__poster"><img class="full-start-new__img full--poster" /></div></div><div class="full-start-new__right"><div class="cardify__left"><div class="full-start-new__head"></div><div class="full-start-new__title">{title}</div><div class="full-start-new__details"></div><div class="full-start-new__buttons"><div class="full-start__button selector button--play"><svg width="28" height="29" viewBox="0 0 28 29" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="14" cy="14.5" r="13" stroke="currentColor" stroke-width="2.7"/><path d="M18.0739 13.634C18.7406 14.0189 18.7406 14.9811 18.0739 15.366L11.751 19.0166C11.0843 19.4015 10.251 18.9204 10.251 18.1506L10.251 10.8494C10.251 10.0796 11.0843 9.5985 11.751 9.9834L18.0739 13.634Z" fill="currentColor"/></svg><span>#{title_watch}</span></div><div class="full-start__button selector button--book"><svg width="21" height="32" viewBox="0 0 21 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 1.5H19C19.2761 1.5 19.5 1.72386 19.5 2V27.9618C19.5 28.3756 19.0261 28.6103 18.697 28.3595L12.6212 23.7303C11.3682 22.7757 9.63183 22.7757 8.37885 23.7303L2.30302 28.3595C1.9739 28.6103 1.5 28.3756 1.5 27.9618V2C1.5 1.72386 1.72386 1.5 2 1.5Z" stroke="currentColor" stroke-width="2.5"/></svg><span>#{settings_input_links}</span></div><div class="full-start__button selector button--reaction"><svg width="38" height="34" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M37.208 10.97L12.07 0.11C11.72-0.04 11.32-0.04 10.97 0.11C10.63 0.25 10.35 0.53 10.2 0.88L0.11 25.25C0.04 25.42 0 25.61 0 25.8C0 25.98 0.04 26.17 0.11 26.34C0.18 26.51 0.29 26.67 0.42 26.8C0.55 26.94 0.71 27.04 0.88 27.11L17.25 33.89C17.59 34.04 17.99 34.04 18.34 33.89L29.66 29.2C29.83 29.13 29.99 29.03 30.12 28.89C30.25 28.76 30.36 28.6 30.43 28.43L37.21 12.07C37.28 11.89 37.32 11.71 37.32 11.52C37.32 11.33 37.28 11.15 37.21 10.97ZM20.43 29.94L21.88 26.43L25.39 27.89L20.43 29.94ZM28.34 26.02L21.65 23.25C21.3 23.11 20.91 23.11 20.56 23.25C20.21 23.4 19.93 23.67 19.79 24.02L17.02 30.71L3.29 25.02L12.29 3.29L34.03 12.29L28.34 26.02Z" fill="currentColor"/><path d="M25.35 16.98L24.26 14.34L16.96 17.37L15.72 14.38L13.09 15.47L15.42 21.09L25.35 16.98Z" fill="currentColor"/></svg><span>#{title_reactions}</span></div><div class="full-start__button selector button--subscribe hide"></div><div class="full-start__button selector button--options"><svg width="38" height="10" viewBox="0 0 38 10" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="4.89" cy="4.99" r="4.75" fill="currentColor"/><circle cx="18.97" cy="4.99" r="4.75" fill="currentColor"/><circle cx="33.06" cy="4.99" r="4.75" fill="currentColor"/></svg></div></div></div><div class="cardify__right"><div class="full-start-new__reactions selector"><div>#{reactions_none}</div></div><div class="full-start-new__rate-line"><div class="full-start__pg hide"></div><div class="full-start__status hide"></div></div></div></div></div><div class="hide buttons--container"><div class="full-start__button view--torrent hide"></div><div class="full-start__button selector view--trailer"></div></div></div>');
+
+        // CSS + Умный оверлей + Скрытие постера
         var style = $('<style id="cardify-css">\
             .cardify .full-start-new__body{height:80vh}\
             .cardify .full-start-new__right{display:flex;align-items:flex-end}\
             .cardify .full-start-new__title{text-shadow:0 0 10px rgba(0,0,0,0.8);font-size:5em !important;line-height:1.1 !important;margin-bottom:0.15em;position:relative;z-index:2}\
             .cardify .full-start-new__details{margin-bottom:0.5em;font-size:1.3em;opacity:0.9;text-shadow:0 1px 2px rgba(0,0,0,0.8);position:relative;z-index:2}\
+            .cardify .full-start-new__head{margin-bottom:0.3em;position:relative;z-index:2}\
+            .cardify img.full--logo,.cardify .full-start__title-img{max-height:24em !important;max-width:90% !important;height:auto !important;width:auto !important;object-fit:contain !important}\
             .cardify__left{flex-grow:1;max-width:70%;position:relative;z-index:2}\
             .cardify__right{display:flex;align-items:center;flex-shrink:0;position:relative;z-index:2}\
+            .cardify .full-start-new__reactions{margin:0;margin-right:-2.8em}\
+            .cardify .full-start-new__reactions:not(.focus){margin:0}\
+            .cardify .full-start-new__reactions:not(.focus)>div:not(:first-child){display:none}\
+            .cardify .full-start-new__rate-line{margin:0;margin-left:3.5em}\
             .cardify__background{left:0;transition:opacity 1s ease}\
             .cardify__background.cardify-bg-hidden{opacity:0 !important}\
             \
