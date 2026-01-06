@@ -1,6 +1,18 @@
 (function () {
     'use strict';
 
+    // Список Invidious/Piped инстансов (прокси для YouTube)
+    var PROXY_INSTANCES = [
+        'https://inv.nadeko.net',
+        'https://invidious.nerdvpn.de',
+        'https://invidious.jing.rocks',
+        'https://piped.video',
+        'https://pipedapi.kavin.rocks',
+        'https://vid.puffyan.us',
+        'https://invidious.snopyta.org',
+        'https://yewtu.be'
+    ];
+
     // Простая машина состояний
     function State(object) {
         this.state = object.state;
@@ -17,7 +29,7 @@
         };
     }
 
-    // Класс Player для YouTube видео
+    // Класс Player для видео через HTML5 (без YouTube API)
     var Player = function(object, video) {
         var self = this;
         
@@ -27,13 +39,16 @@
         this.loaded = false;
         this.timer = null;
         this.listener = Lampa.Subscribe();
+        this.videoUrl = null;
+        this.currentInstance = 0;
         
         this.html = $('\
             <div class="cardify-trailer">\
-                <div class="cardify-trailer__youtube">\
-                    <div class="cardify-trailer__youtube-iframe"></div>\
-                    <div class="cardify-trailer__youtube-line one"></div>\
-                    <div class="cardify-trailer__youtube-line two"></div>\
+                <div class="cardify-trailer__player">\
+                    <video class="cardify-trailer__video" playsinline></video>\
+                    <div class="cardify-trailer__loading">\
+                        <div class="cardify-trailer__spinner"></div>\
+                    </div>\
                 </div>\
                 <div class="cardify-trailer__controlls">\
                     <div class="cardify-trailer__title"></div>\
@@ -53,90 +68,174 @@
             </div>\
         ');
 
-        if (typeof YT !== 'undefined' && YT.Player) {
-            this.youtube = new YT.Player(this.html.find('.cardify-trailer__youtube-iframe')[0], {
-                height: window.innerHeight * 2,
-                width: window.innerWidth,
-                playerVars: {
-                    'controls': 1,
-                    'showinfo': 0,
-                    'autohide': 1,
-                    'modestbranding': 1,
-                    'autoplay': 0,
-                    'disablekb': 1,
-                    'fs': 0,
-                    'enablejsapi': 1,
-                    'playsinline': 1,
-                    'rel': 0,
-                    'suggestedQuality': 'hd1080',
-                    'setPlaybackQuality': 'hd1080',
-                    'mute': 1
-                },
-                videoId: video.id,
-                events: {
-                    onReady: function(event) {
-                        self.loaded = true;
-                        self.listener.send('loaded');
-                    },
-                    onStateChange: function(state) {
-                        if (state.data == YT.PlayerState.PLAYING) {
-                            self.paused = false;
-                            clearInterval(self.timer);
-                            
-                            self.timer = setInterval(function() {
-                                var left = self.youtube.getDuration() - self.youtube.getCurrentTime();
-                                var toend = 13;
-                                var fade = 5;
+        this.videoElement = this.html.find('.cardify-trailer__video')[0];
+        this.loadingElement = this.html.find('.cardify-trailer__loading');
 
-                                if (left <= toend + fade) {
-                                    var vol = 1 - (toend + fade - left) / fade;
-                                    self.youtube.setVolume(Math.max(0, vol * 100));
-
-                                    if (left <= toend) {
-                                        clearInterval(self.timer);
-                                        self.listener.send('ended');
-                                    }
+        // Получаем прямую ссылку на видео через прокси
+        this.getVideoUrl = function(videoId, callback) {
+            var instance = Lampa.Storage.get('cardify_proxy_instance', '') || PROXY_INSTANCES[0];
+            
+            // Пробуем получить видео через API инстанса
+            var tryInstance = function(url) {
+                self.loadingElement.show();
+                
+                // Для Piped
+                if (url.indexOf('piped') !== -1) {
+                    $.ajax({
+                        url: url + '/streams/' + videoId,
+                        timeout: 10000,
+                        success: function(data) {
+                            if (data && data.videoStreams && data.videoStreams.length) {
+                                // Сортируем по качеству и берём лучшее MP4
+                                var streams = data.videoStreams.filter(function(s) {
+                                    return s.mimeType && s.mimeType.indexOf('video/mp4') !== -1;
+                                }).sort(function(a, b) {
+                                    return (b.height || 0) - (a.height || 0);
+                                });
+                                
+                                if (streams.length) {
+                                    callback(streams[0].url);
+                                    return;
                                 }
-                            }, 100);
-
-                            self.listener.send('play');
-
-                            if (window.cardify_fist_unmute) self.unmute();
+                            }
+                            
+                            // Если есть HLS
+                            if (data && data.hls) {
+                                callback(data.hls);
+                                return;
+                            }
+                            
+                            callback(null);
+                        },
+                        error: function() {
+                            callback(null);
                         }
-
-                        if (state.data == YT.PlayerState.PAUSED) {
-                            self.paused = true;
-                            clearInterval(self.timer);
-                            self.listener.send('paused');
+                    });
+                } 
+                // Для Invidious
+                else {
+                    $.ajax({
+                        url: url + '/api/v1/videos/' + videoId,
+                        timeout: 10000,
+                        success: function(data) {
+                            if (data && data.formatStreams && data.formatStreams.length) {
+                                // Берём лучшее качество
+                                var streams = data.formatStreams.sort(function(a, b) {
+                                    return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0);
+                                });
+                                
+                                callback(streams[0].url);
+                                return;
+                            }
+                            
+                            if (data && data.adaptiveFormats) {
+                                var videos = data.adaptiveFormats.filter(function(f) {
+                                    return f.type && f.type.indexOf('video/mp4') !== -1;
+                                }).sort(function(a, b) {
+                                    return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0);
+                                });
+                                
+                                if (videos.length) {
+                                    callback(videos[0].url);
+                                    return;
+                                }
+                            }
+                            
+                            callback(null);
+                        },
+                        error: function() {
+                            callback(null);
                         }
+                    });
+                }
+            };
 
-                        if (state.data == YT.PlayerState.ENDED) {
-                            self.listener.send('ended');
-                        }
+            tryInstance(instance);
+        };
 
-                        if (state.data == YT.PlayerState.BUFFERING) {
-                            state.target.setPlaybackQuality('hd1080');
-                        }
-                    },
-                    onError: function(e) {
-                        self.loaded = false;
-                        self.listener.send('error');
-                    }
+        // Инициализация видео
+        this.initVideo = function() {
+            self.getVideoUrl(video.id, function(url) {
+                self.loadingElement.hide();
+                
+                if (url) {
+                    self.videoUrl = url;
+                    self.videoElement.src = url;
+                    self.videoElement.muted = true;
+                    self.videoElement.load();
+                    
+                    self.loaded = true;
+                    self.listener.send('loaded');
+                } else {
+                    self.loaded = false;
+                    self.listener.send('error');
                 }
             });
-        }
+        };
+
+        // События видео
+        $(this.videoElement).on('play playing', function() {
+            self.paused = false;
+            clearInterval(self.timer);
+            
+            self.timer = setInterval(function() {
+                var left = self.videoElement.duration - self.videoElement.currentTime;
+                var toend = 13;
+                var fade = 5;
+
+                if (left <= toend + fade) {
+                    var vol = 1 - (toend + fade - left) / fade;
+                    self.videoElement.volume = Math.max(0, vol);
+
+                    if (left <= toend) {
+                        clearInterval(self.timer);
+                        self.listener.send('ended');
+                    }
+                }
+            }, 100);
+
+            self.listener.send('play');
+
+            if (window.cardify_fist_unmute) self.unmute();
+        });
+
+        $(this.videoElement).on('pause', function() {
+            self.paused = true;
+            clearInterval(self.timer);
+            self.listener.send('paused');
+        });
+
+        $(this.videoElement).on('ended', function() {
+            self.listener.send('ended');
+        });
+
+        $(this.videoElement).on('error', function() {
+            self.loaded = false;
+            self.listener.send('error');
+        });
+
+        // Запускаем загрузку
+        this.initVideo();
 
         this.play = function() {
-            try { this.youtube.playVideo(); } catch (e) {}
+            try { 
+                var playPromise = this.videoElement.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(function(e) {
+                        console.log('Cardify: Autoplay prevented', e);
+                    });
+                }
+            } catch (e) {}
         };
 
         this.pause = function() {
-            try { this.youtube.pauseVideo(); } catch (e) {}
+            try { this.videoElement.pause(); } catch (e) {}
         };
 
         this.unmute = function() {
             try {
-                this.youtube.unMute();
+                this.videoElement.muted = false;
+                this.videoElement.volume = 1;
                 this.html.find('.cardify-trailer__remote').remove();
                 window.cardify_fist_unmute = true;
             } catch (e) {}
@@ -159,7 +258,11 @@
         this.destroy = function() {
             this.loaded = false;
             this.display = false;
-            try { this.youtube.destroy(); } catch (e) {}
+            try { 
+                this.videoElement.pause();
+                this.videoElement.src = '';
+                this.videoElement.load();
+            } catch (e) {}
             clearInterval(this.timer);
             this.html.remove();
         };
@@ -255,8 +358,16 @@
                 </div>\
             ');
 
-            Lampa.Utils.imgLoad($('img', preview), this.video.img, function() {
+            // Используем прокси для превью
+            var proxyInstance = Lampa.Storage.get('cardify_proxy_instance', '') || PROXY_INSTANCES[0];
+            var imgUrl = proxyInstance + '/vi/' + this.video.id + '/mqdefault.jpg';
+            
+            // Fallback на оригинальный YouTube если прокси не работает
+            Lampa.Utils.imgLoad($('img', preview), imgUrl, function() {
                 $('img', preview).addClass('loaded');
+            }, function() {
+                // Fallback
+                $('img', preview).attr('src', 'https://img.youtube.com/vi/' + self.video.id + '/mqdefault.jpg').addClass('loaded');
             });
 
             this.object.activity.render().find('.cardify__right').append(preview);
@@ -364,10 +475,6 @@
     };
 
     function startPlugin() {
-        // УБРАНЫ ПРОВЕРКИ НА ПРЕМИУМ И TV
-        // if (!Lampa.Platform.screen('tv')) return;
-        // if (!Lampa.Account.hasPremium()) return;
-
         // Добавляем переводы
         Lampa.Lang.add({
             cardify_enable_sound: {
@@ -387,6 +494,24 @@
                 zh: '显示预告片',
                 pt: 'Mostrar trailer',
                 bg: 'Показване на трейлър'
+            },
+            cardify_proxy_instance: {
+                ru: 'Прокси-сервер (Invidious/Piped)',
+                en: 'Proxy server (Invidious/Piped)',
+                uk: 'Проксі-сервер (Invidious/Piped)',
+                be: 'Проксі-сервер (Invidious/Piped)',
+                zh: '代理服务器 (Invidious/Piped)',
+                pt: 'Servidor proxy (Invidious/Piped)',
+                bg: 'Прокси сървър (Invidious/Piped)'
+            },
+            cardify_proxy_description: {
+                ru: 'Введите адрес Invidious или Piped инстанса',
+                en: 'Enter Invidious or Piped instance URL',
+                uk: 'Введіть адресу Invidious або Piped інстансу',
+                be: 'Увядзіце адрас Invidious ці Piped інстансу',
+                zh: '输入 Invidious 或 Piped 实例地址',
+                pt: 'Digite o URL da instância Invidious ou Piped',
+                bg: 'Въведете URL на Invidious или Piped инстанция'
             }
         });
 
@@ -471,10 +596,69 @@
             </div>\
         ');
 
-        // CSS стили
+        // CSS стили с УВЕЛИЧЕННЫМ ЛОГОТИПОМ/НАЗВАНИЕМ
         var style = '\
             <style>\
-            .cardify{-webkit-transition:all .3s;-o-transition:all .3s;-moz-transition:all .3s;transition:all .3s}.cardify .full-start-new__body{height:80vh}.cardify .full-start-new__right{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:end;-webkit-align-items:flex-end;-moz-box-align:end;-ms-flex-align:end;align-items:flex-end}.cardify .full-start-new__title{text-shadow:0 0 .1em rgba(0,0,0,0.3)}.cardify__left{-webkit-box-flex:1;-webkit-flex-grow:1;-moz-box-flex:1;-ms-flex-positive:1;flex-grow:1}.cardify__right{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;position:relative}.cardify__details{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex}.cardify .full-start-new__reactions{margin:0;margin-right:-2.8em}.cardify .full-start-new__reactions:not(.focus){margin:0}.cardify .full-start-new__reactions:not(.focus)>div:not(:first-child){display:none}.cardify .full-start-new__reactions:not(.focus) .reaction{position:relative}.cardify .full-start-new__reactions:not(.focus) .reaction__count{position:absolute;top:28%;left:95%;font-size:1.2em;font-weight:500}.cardify .full-start-new__rate-line{margin:0;margin-left:3.5em}.cardify .full-start-new__rate-line>*:last-child{margin-right:0 !important}.cardify__background{left:0}.cardify__background.loaded:not(.dim){opacity:1}.cardify__background.nodisplay{opacity:0 !important}.cardify.nodisplay{-webkit-transform:translate3d(0,50%,0);-moz-transform:translate3d(0,50%,0);transform:translate3d(0,50%,0);opacity:0}.cardify-trailer{opacity:0;-webkit-transition:opacity .3s;-o-transition:opacity .3s;-moz-transition:opacity .3s;transition:opacity .3s}.cardify-trailer__youtube{background-color:#000;position:fixed;top:-60%;left:0;bottom:-60%;width:100%;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center}.cardify-trailer__youtube iframe{border:0;width:100%;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0}.cardify-trailer__youtube-line{position:fixed;height:6.2em;background-color:#000;width:100%;left:0;display:none}.cardify-trailer__youtube-line.one{top:0}.cardify-trailer__youtube-line.two{bottom:0}.cardify-trailer__controlls{position:fixed;left:1.5em;right:1.5em;bottom:1.5em;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:end;-webkit-align-items:flex-end;-moz-box-align:end;-ms-flex-align:end;align-items:flex-end;-webkit-transform:translate3d(0,-100%,0);-moz-transform:translate3d(0,-100%,0);transform:translate3d(0,-100%,0);opacity:0;-webkit-transition:all .3s;-o-transition:all .3s;-moz-transition:all .3s;transition:all .3s}.cardify-trailer__title{-webkit-box-flex:1;-webkit-flex-grow:1;-moz-box-flex:1;-ms-flex-positive:1;flex-grow:1;padding-right:5em;font-size:4em;font-weight:600;overflow:hidden;-o-text-overflow:\'.\';text-overflow:\'.\';display:-webkit-box;-webkit-line-clamp:1;line-clamp:1;-webkit-box-orient:vertical;line-height:1.4}.cardify-trailer__remote{-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center}.cardify-trailer__remote-icon{-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;width:2.5em;height:2.5em}.cardify-trailer__remote-text{margin-left:1em}.cardify-trailer.display{opacity:1}.cardify-trailer.display .cardify-trailer__controlls{-webkit-transform:translate3d(0,0,0);-moz-transform:translate3d(0,0,0);transform:translate3d(0,0,0);opacity:1}.cardify-preview{position:absolute;bottom:100%;right:0;-webkit-border-radius:.3em;-moz-border-radius:.3em;border-radius:.3em;width:6em;height:4em;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;background-color:#000;overflow:hidden}.cardify-preview>div{position:relative;width:100%;height:100%}.cardify-preview__img{opacity:0;position:absolute;left:0;top:0;width:100%;height:100%;-webkit-background-size:cover;-moz-background-size:cover;-o-background-size:cover;background-size:cover;-webkit-transition:opacity .2s;-o-transition:opacity .2s;-moz-transition:opacity .2s;transition:opacity .2s}.cardify-preview__img.loaded{opacity:1}.cardify-preview__loader{position:absolute;left:50%;bottom:0;-webkit-transform:translate3d(-50%,0,0);-moz-transform:translate3d(-50%,0,0);transform:translate3d(-50%,0,0);height:.2em;-webkit-border-radius:.2em;-moz-border-radius:.2em;border-radius:.2em;background-color:#fff;width:0;-webkit-transition:width .1s linear;-o-transition:width .1s linear;-moz-transition:width .1s linear;transition:width .1s linear}.cardify-preview__line{position:absolute;height:.8em;left:0;width:100%;background-color:#000}.cardify-preview__line.one{top:0}.cardify-preview__line.two{bottom:0}.head.nodisplay{-webkit-transform:translate3d(0,-100%,0);-moz-transform:translate3d(0,-100%,0);transform:translate3d(0,-100%,0)}body:not(.menu--open) .cardify__background{-webkit-mask-image:-webkit-gradient(linear,left top,left bottom,color-stop(50%,white),to(rgba(255,255,255,0)));-webkit-mask-image:-webkit-linear-gradient(top,white 50%,rgba(255,255,255,0) 100%);mask-image:-webkit-gradient(linear,left top,left bottom,color-stop(50%,white),to(rgba(255,255,255,0)));mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%)}\
+            .cardify{-webkit-transition:all .3s;-o-transition:all .3s;-moz-transition:all .3s;transition:all .3s}\
+            .cardify .full-start-new__body{height:80vh}\
+            .cardify .full-start-new__right{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:end;-webkit-align-items:flex-end;-moz-box-align:end;-ms-flex-align:end;align-items:flex-end}\
+            .cardify .full-start-new__title{text-shadow:0 0 .1em rgba(0,0,0,0.3);font-size:4.5em !important;line-height:1.1 !important}\
+            .cardify .full-start-new__head{margin-bottom:0.5em}\
+            /* Увеличенный логотип для плагина logo */\
+            .cardify .full-start-new__title img,\
+            .cardify .full-start-new__head img,\
+            .cardify .full-start__title-img,\
+            .cardify .logo-image,\
+            .cardify img.full--logo{\
+                max-height: 12em !important;\
+                max-width: 80% !important;\
+                height: auto !important;\
+                width: auto !important;\
+                object-fit: contain !important;\
+            }\
+            /* Если логотип в заголовке */\
+            .cardify .full-start-new__head .full-start__title-img,\
+            .cardify .full-start-new__head .logo-image{\
+                max-height: 10em !important;\
+            }\
+            .cardify__left{-webkit-box-flex:1;-webkit-flex-grow:1;-moz-box-flex:1;-ms-flex-positive:1;flex-grow:1}\
+            .cardify__right{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center;-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;position:relative}\
+            .cardify__details{display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex}\
+            .cardify .full-start-new__reactions{margin:0;margin-right:-2.8em}\
+            .cardify .full-start-new__reactions:not(.focus){margin:0}\
+            .cardify .full-start-new__reactions:not(.focus)>div:not(:first-child){display:none}\
+            .cardify .full-start-new__reactions:not(.focus) .reaction{position:relative}\
+            .cardify .full-start-new__reactions:not(.focus) .reaction__count{position:absolute;top:28%;left:95%;font-size:1.2em;font-weight:500}\
+            .cardify .full-start-new__rate-line{margin:0;margin-left:3.5em}\
+            .cardify .full-start-new__rate-line>*:last-child{margin-right:0 !important}\
+            .cardify__background{left:0}\
+            .cardify__background.loaded:not(.dim){opacity:1}\
+            .cardify__background.nodisplay{opacity:0 !important}\
+            .cardify.nodisplay{-webkit-transform:translate3d(0,50%,0);-moz-transform:translate3d(0,50%,0);transform:translate3d(0,50%,0);opacity:0}\
+            .cardify-trailer{opacity:0;-webkit-transition:opacity .3s;-o-transition:opacity .3s;-moz-transition:opacity .3s;transition:opacity .3s;position:fixed;top:0;left:0;right:0;bottom:0;z-index:999}\
+            .cardify-trailer__player{background-color:#000;position:fixed;top:0;left:0;right:0;bottom:0;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center;justify-content:center}\
+            .cardify-trailer__video{width:100%;height:100%;object-fit:contain;background:#000}\
+            .cardify-trailer__loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}\
+            .cardify-trailer__spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:cardify-spin 1s linear infinite}\
+            @keyframes cardify-spin{to{transform:rotate(360deg)}}\
+            .cardify-trailer__controlls{position:fixed;left:1.5em;right:1.5em;bottom:1.5em;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:end;-webkit-align-items:flex-end;-moz-box-align:end;-ms-flex-align:end;align-items:flex-end;-webkit-transform:translate3d(0,-100%,0);-moz-transform:translate3d(0,-100%,0);transform:translate3d(0,-100%,0);opacity:0;-webkit-transition:all .3s;-o-transition:all .3s;-moz-transition:all .3s;transition:all .3s}\
+            .cardify-trailer__title{-webkit-box-flex:1;-webkit-flex-grow:1;-moz-box-flex:1;-ms-flex-positive:1;flex-grow:1;padding-right:5em;font-size:4em;font-weight:600;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;line-clamp:1;-webkit-box-orient:vertical;line-height:1.4}\
+            .cardify-trailer__remote{-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-webkit-align-items:center;-moz-box-align:center;-ms-flex-align:center;align-items:center}\
+            .cardify-trailer__remote-icon{-webkit-flex-shrink:0;-ms-flex-negative:0;flex-shrink:0;width:2.5em;height:2.5em}\
+            .cardify-trailer__remote-icon svg{width:100%;height:100%}\
+            .cardify-trailer__remote-text{margin-left:1em}\
+            .cardify-trailer.display{opacity:1}\
+            .cardify-trailer.display .cardify-trailer__controlls{-webkit-transform:translate3d(0,0,0);-moz-transform:translate3d(0,0,0);transform:translate3d(0,0,0);opacity:1}\
+            .cardify-preview{position:absolute;bottom:100%;right:0;-webkit-border-radius:.3em;-moz-border-radius:.3em;border-radius:.3em;width:6em;height:4em;display:-webkit-box;display:-webkit-flex;display:-moz-box;display:-ms-flexbox;display:flex;background-color:#000;overflow:hidden}\
+            .cardify-preview>div{position:relative;width:100%;height:100%}\
+            .cardify-preview__img{opacity:0;position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;-webkit-transition:opacity .2s;-o-transition:opacity .2s;-moz-transition:opacity .2s;transition:opacity .2s}\
+            .cardify-preview__img.loaded{opacity:1}\
+            .cardify-preview__loader{position:absolute;left:50%;bottom:0;-webkit-transform:translate3d(-50%,0,0);-moz-transform:translate3d(-50%,0,0);transform:translate3d(-50%,0,0);height:.2em;-webkit-border-radius:.2em;-moz-border-radius:.2em;border-radius:.2em;background-color:#fff;width:0;-webkit-transition:width .1s linear;-o-transition:width .1s linear;-moz-transition:width .1s linear;transition:width .1s linear}\
+            .cardify-preview__line{position:absolute;height:.8em;left:0;width:100%;background-color:#000}\
+            .cardify-preview__line.one{top:0}\
+            .cardify-preview__line.two{bottom:0}\
+            .head.nodisplay{-webkit-transform:translate3d(0,-100%,0);-moz-transform:translate3d(0,-100%,0);transform:translate3d(0,-100%,0)}\
+            body:not(.menu--open) .cardify__background{-webkit-mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%);mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%)}\
             </style>\
         ';
         
@@ -507,6 +691,28 @@
             }
         });
 
+        // Настройка прокси-сервера
+        Lampa.SettingsApi.addParam({
+            component: 'cardify',
+            param: {
+                name: 'cardify_proxy_instance',
+                type: 'select',
+                values: {
+                    'https://inv.nadeko.net': 'inv.nadeko.net',
+                    'https://invidious.nerdvpn.de': 'invidious.nerdvpn.de',
+                    'https://invidious.jing.rocks': 'invidious.jing.rocks',
+                    'https://piped.video': 'piped.video',
+                    'https://vid.puffyan.us': 'vid.puffyan.us',
+                    'https://yewtu.be': 'yewtu.be'
+                },
+                default: 'https://inv.nadeko.net'
+            },
+            field: {
+                name: Lampa.Lang.translate('cardify_proxy_instance'),
+                description: Lampa.Lang.translate('cardify_proxy_description')
+            }
+        });
+
         // Функция получения видео трейлера
         function getVideo(data) {
             if (data.videos && data.videos.results.length) {
@@ -519,7 +725,7 @@
                         code: element.iso_639_1,
                         time: new Date(element.published_at).getTime(),
                         url: 'https://www.youtube.com/watch?v=' + element.key,
-                        img: 'https://img.youtube.com/vi/' + element.key + '/default.jpg'
+                        img: 'https://img.youtube.com/vi/' + element.key + '/mqdefault.jpg'
                     });
                 });
 
