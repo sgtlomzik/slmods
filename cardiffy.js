@@ -3,16 +3,17 @@
 
     /**
      * Cardify Free Plugin
-     * @version 1.3.0
+     * @version 1.4.0
      * @date 2025-01-XX
      * 
      * Changelog:
+     * 1.4.0 - iTunes трейлеры вместо YouTube, 3 реакции, исправлен размер логотипа
      * 1.3.0 - Интегрирован плагин оригинального названия
      * 1.2.0 - Исправлена блокировка интерфейса
      * 1.1.0 - Заменён YouTube на Invidious прокси
      * 1.0.0 - Первая версия без проверки премиума
      */
-    var PLUGIN_VERSION = '1.3.0';
+    var PLUGIN_VERSION = '1.4.0';
 
     var DEBUG = true;
     
@@ -26,10 +27,108 @@
 
     log('Загрузка плагина...');
 
+    // ==================== МОДУЛЬ ITUNES ТРЕЙЛЕРОВ ====================
+    var iTunesTrailer = (function() {
+        
+        function cacheRequest(search, movie, isTv, success, fail) {
+            var url = 'https://itunes.apple.com/search' +
+                '?term=' + encodeURIComponent(search).replace(/%20/g, '+') +
+                '&media=' + (isTv ? 'tvShow' : 'movie') +
+                '&lang=' + (Lampa.Storage.field('language') || 'en');
+            
+            var id = (isTv ? 'tv' : '') + (movie.id || (Lampa.Utils.hash(search) * 1).toString(36));
+            var key = 'cardify_itunes_' + id;
+            var cached = sessionStorage.getItem(key);
+            
+            if (cached) {
+                var data = JSON.parse(cached);
+                if (data[0]) {
+                    if (typeof success === 'function') success(data[1]);
+                } else {
+                    if (typeof fail === 'function') fail(data[1]);
+                }
+                return;
+            }
+            
+            var network = new Lampa.Reguest();
+            network.timeout(10000);
+            network.native(
+                url,
+                function (data) {
+                    var results = [];
+                    if (data && data.results && data.results[0]) {
+                        var year = (movie.release_date || movie.first_air_date || '')
+                            .replace(/\D+/g, '')
+                            .substring(0, 4)
+                            .replace(/^([03-9]\d|1[0-8]|2[1-9]|20[3-9])\d+$/, '');
+                        
+                        results = data.results.filter(function(r) {
+                            var yearOk = !year || !r.releaseDate || r.releaseDate.substring(0, 4) === year;
+                            var durationOk = isTv || !r.trackTimeMillis || !movie.runtime || 
+                                (Math.abs(movie.runtime * 6e4 - r.trackTimeMillis) < 2e5);
+                            return !!r.previewUrl && yearOk && durationOk;
+                        });
+                    }
+                    
+                    if (results.length) {
+                        sessionStorage.setItem(key, JSON.stringify([true, results, search]));
+                        if (typeof success === 'function') success(results);
+                    } else {
+                        sessionStorage.setItem(key, JSON.stringify([false, {}, search]));
+                        if (typeof fail === 'function') fail({});
+                    }
+                    
+                    network.clear();
+                },
+                function (error) {
+                    sessionStorage.setItem(key, JSON.stringify([false, error, search]));
+                    if (typeof fail === 'function') fail(error);
+                    network.clear();
+                },
+                false,
+                {
+                    dataType: 'json'
+                }
+            );
+        }
+        
+        function load(movie, isTv, callback) {
+            var title = movie.original_title || movie.original_name || movie.title || movie.name || '';
+            
+            if (title === '' || !/[a-z]{3}/i.test(title)) {
+                callback(null);
+                return;
+            }
+            
+            log('iTunes поиск:', title);
+            
+            cacheRequest(title, movie, isTv, function(data) {
+                if (data && data[0]) {
+                    var res = data[0];
+                    var video = {
+                        title: (res.trackCensoredName || res.trackName || title),
+                        url: res.previewUrl,
+                        iptv: true
+                    };
+                    log('iTunes найден:', video.url);
+                    callback(video);
+                } else {
+                    callback(null);
+                }
+            }, function() {
+                callback(null);
+            });
+        }
+        
+        return {
+            load: load
+        };
+    })();
+
     // ==================== МОДУЛЬ ОРИГИНАЛЬНОГО НАЗВАНИЯ ====================
     var OriginalTitle = (function() {
         var storageKey = "cardify_title_cache";
-        var CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 дней
+        var CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
         var titleCache = Lampa.Storage.get(storageKey) || {};
 
         function cleanOldCache() {
@@ -120,36 +219,20 @@
             var lang = Lampa.Storage.get("language") || 'ru';
             var items = [];
             
-            // Оригинальное название
             if (titles.original) {
-                items.push({
-                    title: titles.original,
-                    label: 'Original'
-                });
+                items.push({ title: titles.original, label: 'Original' });
             }
             
-            // Транслитерация (если отличается)
             if (titles.translit && titles.translit !== titles.original && titles.translit !== titles.en) {
-                items.push({
-                    title: titles.translit,
-                    label: 'Translit'
-                });
+                items.push({ title: titles.translit, label: 'Translit' });
             }
             
-            // Английское (если язык не английский и отличается от оригинала)
             if (titles.en && lang !== 'en' && titles.en !== titles.original) {
-                items.push({
-                    title: titles.en,
-                    label: 'EN'
-                });
+                items.push({ title: titles.en, label: 'EN' });
             }
             
-            // Русское (если язык не русский)
             if (titles.ru && lang !== 'ru') {
-                items.push({
-                    title: titles.ru,
-                    label: 'RU'
-                });
+                items.push({ title: titles.ru, label: 'RU' });
             }
 
             if (items.length === 0) return;
@@ -163,12 +246,9 @@
             });
             html += '</div>';
 
-            // Вставляем после details (год, жанры)
-            var details = container.find('.full-start-new__details');
-            if (details.length) {
-                details.after(html);
-            } else {
-                container.find('.full-start-new__title').after(html);
+            var buttons = container.find('.full-start-new__buttons');
+            if (buttons.length) {
+                buttons.before(html);
             }
         }
 
@@ -178,16 +258,6 @@
             render: render
         };
     })();
-
-    // ==================== INVIDIOUS INSTANCES ====================
-    var INVIDIOUS_INSTANCES = [
-        'https://iv.ggtyler.dev',
-        'https://invidious.nerdvpn.de', 
-        'https://yt.artemislena.eu',
-        'https://invidious.privacyredirect.com',
-        'https://invidious.protokolla.fi',
-        'https://inv.nadeko.net'
-    ];
 
     // ==================== STATE MACHINE ====================
     function State(object) {
@@ -203,22 +273,19 @@
         };
     }
 
-    // ==================== PLAYER ====================
+    // ==================== PLAYER (iTunes) ====================
     var Player = function(object, video) {
         var self = this;
         
         this.paused = false;
         this.display = false;
         this.loaded = false;
-        this.loading = false;
         this.destroyed = false;
         this.timer = null;
         this.listener = Lampa.Subscribe();
-        this.videoId = video.id;
-        this.videoTitle = video.title;
-        this.currentRequest = null;
+        this.video = video;
         
-        log('Player создан:', video.id);
+        log('Player создан:', video.title);
         
         this.html = $('\
             <div class="cardify-trailer">\
@@ -252,94 +319,30 @@
             this.statusElement.text(text);
         };
 
-        this.tryGetVideo = function(instances, index, callback) {
+        this.initVideo = function() {
             if (self.destroyed) return;
             
-            if (index >= instances.length) {
-                log('Все инстансы недоступны');
-                callback(null);
-                return;
-            }
-
-            var instance = instances[index];
-            var apiUrl = instance + '/api/v1/videos/' + self.videoId + '?fields=formatStreams,adaptiveFormats';
+            self.setStatus('Загрузка трейлера...');
+            log('Загружаем:', video.url);
             
-            self.setStatus('Проверка ' + (index + 1) + '/' + instances.length);
-            log('Запрос:', apiUrl);
-
-            self.currentRequest = $.ajax({
-                url: apiUrl,
-                timeout: 8000,
-                dataType: 'json',
-                success: function(data) {
-                    if (self.destroyed) return;
-                    
-                    var videoUrl = null;
-                    
-                    if (data.formatStreams && data.formatStreams.length) {
-                        var streams = data.formatStreams.sort(function(a, b) {
-                            return (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0);
-                        });
-                        
-                        for (var i = 0; i < streams.length; i++) {
-                            var q = parseInt(streams[i].qualityLabel) || 0;
-                            if (q <= 720 && streams[i].url) {
-                                videoUrl = streams[i].url;
-                                break;
-                            }
-                        }
-                        
-                        if (!videoUrl && streams[0] && streams[0].url) {
-                            videoUrl = streams[0].url;
-                        }
-                    }
-                    
-                    if (videoUrl) {
-                        callback(videoUrl);
-                    } else {
-                        self.tryGetVideo(instances, index + 1, callback);
-                    }
-                },
-                error: function() {
-                    if (self.destroyed) return;
-                    self.tryGetVideo(instances, index + 1, callback);
-                }
-            });
-        };
-
-        this.initVideo = function() {
-            if (self.loading || self.destroyed) return;
-            self.loading = true;
+            self.videoElement.src = video.url;
+            self.videoElement.muted = true;
             
-            self.setStatus('Поиск трейлера...');
-            
-            self.tryGetVideo(INVIDIOUS_INSTANCES, 0, function(url) {
+            $(self.videoElement).one('loadeddata canplay', function() {
                 if (self.destroyed) return;
-                self.loading = false;
-                
-                if (url) {
-                    self.setStatus('Загрузка...');
-                    
-                    self.videoElement.src = url;
-                    self.videoElement.muted = true;
-                    
-                    $(self.videoElement).one('loadeddata canplay', function() {
-                        if (self.destroyed) return;
-                        self.loadingElement.hide();
-                        self.loaded = true;
-                        self.listener.send('loaded');
-                    });
-                    
-                    $(self.videoElement).one('error', function() {
-                        if (self.destroyed) return;
-                        self.listener.send('error');
-                    });
-                    
-                    self.videoElement.load();
-                } else {
-                    self.listener.send('error');
-                }
+                log('Видео готово');
+                self.loadingElement.hide();
+                self.loaded = true;
+                self.listener.send('loaded');
             });
+            
+            $(self.videoElement).one('error', function(e) {
+                if (self.destroyed) return;
+                log('Ошибка загрузки видео');
+                self.listener.send('error');
+            });
+            
+            self.videoElement.load();
         };
 
         $(this.videoElement).on('playing', function() {
@@ -352,13 +355,13 @@
                 
                 var left = self.videoElement.duration - self.videoElement.currentTime;
                 
-                if (left <= 18) {
-                    var vol = Math.max(0, (left - 13) / 5);
+                if (left <= 10) {
+                    var vol = Math.max(0, (left - 5) / 5);
                     if (!self.videoElement.muted) {
                         self.videoElement.volume = vol;
                     }
                     
-                    if (left <= 13) {
+                    if (left <= 5) {
                         clearInterval(self.timer);
                         self.listener.send('ended');
                     }
@@ -382,6 +385,7 @@
             self.listener.send('ended');
         });
 
+        // Запуск загрузки
         setTimeout(function() {
             self.initVideo();
         }, 100);
@@ -390,7 +394,7 @@
             if (this.destroyed) return;
             try { 
                 var p = this.videoElement.play();
-                if (p) p.catch(function(e) {});
+                if (p) p.catch(function(e) { log('Autoplay blocked'); });
             } catch (e) {}
         };
 
@@ -427,12 +431,7 @@
             this.destroyed = true;
             this.loaded = false;
             this.display = false;
-            this.loading = false;
             clearInterval(this.timer);
-            
-            if (this.currentRequest) {
-                try { this.currentRequest.abort(); } catch(e) {}
-            }
             
             try { 
                 this.videoElement.pause();
@@ -491,9 +490,7 @@
                     if (Lampa.Controller.enabled().name == 'cardify_trailer') {
                         // nothing
                     } else if (Lampa.Controller.enabled().name == 'full_start' && self.same()) {
-                        if (self.player.loaded) {
-                            state.start();
-                        }
+                        if (self.player.loaded) state.start();
                     } else if (self.player.display) {
                         state.dispath('hide');
                     }
@@ -531,11 +528,19 @@
 
         this.preview = function() {
             if (this.destroyed) return;
+            
+            // Для iTunes используем постер фильма
+            var img = this.object.activity.render().find('.full-start__background img').attr('src') || 
+                      this.object.activity.render().find('.full--poster').attr('src') || '';
+            
             var preview = $('\
                 <div class="cardify-preview">\
                     <div>\
-                        <img class="cardify-preview__img" src="https://img.youtube.com/vi/' + this.video.id + '/mqdefault.jpg" />\
+                        <img class="cardify-preview__img" src="' + img + '" />\
                         <div class="cardify-preview__loader"></div>\
+                        <div class="cardify-preview__icon">\
+                            <svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg>\
+                        </div>\
                     </div>\
                 </div>\
             ');
@@ -572,8 +577,6 @@
         };
 
         this.start = function() {
-            var self = this;
-            
             var toggle = function() { 
                 if (!self.destroyed) self.state.dispath('toggle'); 
             };
@@ -650,7 +653,6 @@
     function startPlugin() {
         log('Инициализация...');
 
-        // Инициализация кэша названий
         OriginalTitle.init();
 
         // Переводы
@@ -661,9 +663,9 @@
                 uk: 'Увімкнути звук'
             },
             cardify_enable_trailer: {
-                ru: 'Показывать трейлер',
-                en: 'Show trailer',
-                uk: 'Показувати трейлер'
+                ru: 'Автовоспроизведение трейлера',
+                en: 'Autoplay trailer',
+                uk: 'Автовідтворення трейлера'
             },
             cardify_show_original_title: {
                 ru: 'Показывать оригинальное название',
@@ -672,7 +674,7 @@
             }
         });
 
-        // ШАБЛОН КАРТОЧКИ
+        // ШАБЛОН С 3 РЕАКЦИЯМИ
         Lampa.Template.add('full_start_new', '\
 <div class="full-start-new cardify">\
     <div class="full-start-new__body">\
@@ -690,20 +692,22 @@
                     <div class="full-start__button selector button--play">\
                         <svg width="28" height="29" viewBox="0 0 28 29" fill="none" xmlns="http://www.w3.org/2000/svg">\
                             <circle cx="14" cy="14.5" r="13" stroke="currentColor" stroke-width="2.7"/>\
-                            <path d="M18.0739 13.634C18.7406 14.0189 18.7406 14.9811 18.0739 15.366L11.751 19.0166C11.0843 19.4015 10.251 18.9204 10.251 18.1506L10.251 10.8494C10.251 10.0796 11.0843 9.5985 11.751 9.9834L18.0739 13.634Z" fill="currentColor"/>\
+                            <path d="M18.07 13.63C18.74 14.02 18.74 14.98 18.07 15.37L11.75 19.02C11.08 19.4 10.25 18.92 10.25 18.15V10.85C10.25 10.08 11.08 9.6 11.75 9.98L18.07 13.63Z" fill="currentColor"/>\
                         </svg>\
                         <span>#{title_watch}</span>\
                     </div>\
                     <div class="full-start__button selector button--book">\
                         <svg width="21" height="32" viewBox="0 0 21 32" fill="none" xmlns="http://www.w3.org/2000/svg">\
-                            <path d="M2 1.5H19C19.2761 1.5 19.5 1.72386 19.5 2V27.9618C19.5 28.3756 19.0261 28.6103 18.697 28.3595L12.6212 23.7303C11.3682 22.7757 9.63183 22.7757 8.37885 23.7303L2.30302 28.3595C1.9739 28.6103 1.5 28.3756 1.5 27.9618V2C1.5 1.72386 1.72386 1.5 2 1.5Z" stroke="currentColor" stroke-width="2.5"/>\
+                            <path d="M2 1.5H19C19.28 1.5 19.5 1.72 19.5 2V27.96C19.5 28.38 19.03 28.61 18.7 28.36L12.62 23.73C11.37 22.78 9.63 22.78 8.38 23.73L2.3 28.36C1.97 28.61 1.5 28.38 1.5 27.96V2C1.5 1.72 1.72 1.5 2 1.5Z" stroke="currentColor" stroke-width="2.5"/>\
                         </svg>\
                         <span>#{settings_input_links}</span>\
                     </div>\
                     <div class="full-start__button selector button--reaction">\
-                        <svg width="38" height="34" viewBox="0 0 38 34" fill="none" xmlns="http://www.w3.org/2000/svg">\
-                            <path d="M37.208 10.97L12.07 0.11C11.72-0.04 11.32-0.04 10.97 0.11C10.63 0.25 10.35 0.53 10.2 0.88L0.11 25.25C0.04 25.42 0 25.61 0 25.8C0 25.98 0.04 26.17 0.11 26.34C0.18 26.51 0.29 26.67 0.42 26.8C0.55 26.94 0.71 27.04 0.88 27.11L17.25 33.89C17.59 34.04 17.99 34.04 18.34 33.89L29.66 29.2C29.83 29.13 29.99 29.03 30.12 28.89C30.25 28.76 30.36 28.6 30.43 28.43L37.21 12.07C37.28 11.89 37.32 11.71 37.32 11.52C37.32 11.33 37.28 11.15 37.21 10.97ZM20.43 29.94L21.88 26.43L25.39 27.89L20.43 29.94ZM28.34 26.02L21.65 23.25C21.3 23.11 20.91 23.11 20.56 23.25C20.21 23.4 19.93 23.67 19.79 24.02L17.02 30.71L3.29 25.02L12.29 3.29L34.03 12.29L28.34 26.02Z" fill="currentColor"/>\
-                            <path d="M25.35 16.98L24.26 14.34L16.96 17.37L15.72 14.38L13.09 15.47L15.42 21.09L25.35 16.98Z" fill="currentColor"/>\
+                        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">\
+                            <path d="M16 2C8.27 2 2 8.27 2 16s6.27 14 14 14 14-6.27 14-14S23.73 2 16 2zm0 25.2c-6.18 0-11.2-5.02-11.2-11.2S9.82 4.8 16 4.8 27.2 9.82 27.2 16 22.18 27.2 16 27.2z" fill="currentColor"/>\
+                            <circle cx="11" cy="13" r="2" fill="currentColor"/>\
+                            <circle cx="21" cy="13" r="2" fill="currentColor"/>\
+                            <path d="M16 24c3.31 0 6-2.24 6-5H10c0 2.76 2.69 5 6 5z" fill="currentColor"/>\
                         </svg>\
                         <span>#{title_reactions}</span>\
                     </div>\
@@ -724,7 +728,7 @@
                 </div>\
             </div>\
             <div class="cardify__right">\
-                <div class="full-start-new__reactions selector">\
+                <div class="full-start-new__reactions full-start-new__reactions--cardify selector">\
                     <div>#{reactions_none}</div>\
                 </div>\
                 <div class="full-start-new__rate-line">\
@@ -737,13 +741,13 @@
     <div class="hide buttons--container">\
         <div class="full-start__button view--torrent hide">\
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50" width="50px" height="50px">\
-                <path d="M25,2C12.317,2,2,12.317,2,25s10.317,23,23,23s23-10.317,23-23S37.683,2,25,2z M40.5,30.963c-3.1,0-4.9-2.4-4.9-2.4 S34.1,35,27,35c-1.4,0-3.6-0.837-3.6-0.837l4.17,9.643C26.727,43.92,25.874,44,25,44c-2.157,0-4.222-0.377-6.155-1.039L9.237,16.851 c0,0-0.7-1.2,0.4-1.5c1.1-0.3,5.4-1.2,5.4-1.2s1.475-0.494,1.8,0.5c0.5,1.3,4.063,11.112,4.063,11.112S22.6,29,27.4,29 c4.7,0,5.9-3.437,5.7-3.937c-1.2-3-4.993-11.862-4.993-11.862s-0.6-1.1,0.8-1.4c1.4-0.3,3.8-0.7,3.8-0.7s1.105-0.163,1.6,0.8 c0.738,1.437,5.193,11.262,5.193,11.262s1.1,2.9,3.3,2.9c0.464,0,0.834-0.046,1.152-0.104c-0.082,1.635-0.348,3.221-0.817,4.722 C42.541,30.867,41.756,30.963,40.5,30.963z" fill="currentColor"/>\
+                <path d="M25,2C12.32,2,2,12.32,2,25s10.32,23,23,23s23-10.32,23-23S37.68,2,25,2z" fill="currentColor"/>\
             </svg>\
             <span>#{full_torrents}</span>\
         </div>\
         <div class="full-start__button selector view--trailer">\
             <svg height="70" viewBox="0 0 80 70" fill="none" xmlns="http://www.w3.org/2000/svg">\
-                <path fill-rule="evenodd" clip-rule="evenodd" d="M71.26 2.09C74.7 3.24 77.41 6.63 78.33 10.93C80 18.73 80 35 80 35C80 35 80 51.27 78.33 59.07C77.41 63.37 74.7 66.76 71.26 67.91C65.02 70 40 70 40 70C40 70 14.98 70 8.74 67.91C5.3 66.76 2.59 63.37 1.67 59.07C0 51.27 0 35 0 35C0 35 0 18.73 1.67 10.93C2.59 6.63 5.3 3.24 8.74 2.09C14.98 0 40 0 40 0C40 0 65.02 0 71.26 2.09ZM55.59 35L29.98 49.57V20.43L55.59 35Z" fill="currentColor"/>\
+                <path fill-rule="evenodd" d="M71.26 2.09C74.7 3.24 77.41 6.63 78.33 10.93C80 18.73 80 35 80 35s0 16.27-1.67 24.07c-.92 4.3-3.63 7.69-7.07 8.84C65.02 70 40 70 40 70s-25.02 0-31.26-2.09c-3.44-1.15-6.15-4.54-7.07-8.84C0 51.27 0 35 0 35s0-16.27 1.67-24.07c.92-4.3 3.63-7.69 7.07-8.84C14.98 0 40 0 40 0s25.02 0 31.26 2.09zM55.59 35L29.98 49.57V20.43L55.59 35z" fill="currentColor"/>\
             </svg>\
             <span>#{full_trailers}</span>\
         </div>\
@@ -751,74 +755,114 @@
 </div>');
 
         // CSS СТИЛИ
-        var style = $('<style>\
-            /* === CARDIFY MAIN === */\
+        var style = $('<style id="cardify-styles">\
+            /* === ОСНОВНЫЕ СТИЛИ === */\
             .cardify{transition:all .3s}\
             .cardify .full-start-new__body{height:80vh}\
             .cardify .full-start-new__right{display:flex;align-items:flex-end}\
             .cardify .full-start-new__head{margin-bottom:0.3em}\
-            .cardify .full-start-new__title{\
-                text-shadow:0 0 .1em rgba(0,0,0,0.3);\
-                font-size:5em !important;\
+            \
+            /* === ЛОГОТИП/НАЗВАНИЕ - БОЛЬШОЙ РАЗМЕР === */\
+            .cardify .full-start-new__title,\
+            .cardify .full-start-new__title *{\
+                font-size:4em !important;\
                 line-height:1.1 !important;\
-                margin-bottom:0.15em\
             }\
-            /* Логотип 24em */\
+            .cardify .full-start-new__title{\
+                text-shadow:0 2px 8px rgba(0,0,0,0.5);\
+                margin-bottom:0.1em;\
+            }\
+            /* Логотип-картинка */\
             .cardify .full-start-new__title img,\
             .cardify .full-start-new__head img,\
-            .cardify img.full--logo,\
-            .cardify .full-start__title-img{\
-                max-height:24em !important;\
-                max-width:90% !important;\
+            .cardify .full-start__title-img,\
+            .cardify img.full--logo{\
+                max-height:10em !important;\
+                min-height:4em !important;\
+                max-width:85% !important;\
                 height:auto !important;\
                 width:auto !important;\
                 object-fit:contain !important;\
+                display:block !important;\
             }\
+            \
+            /* === ДЕТАЛИ (год, жанры) === */\
             .cardify .full-start-new__details{\
+                margin-top:0.8em;\
                 margin-bottom:0.5em;\
                 font-size:1.3em;\
-                opacity:0.7\
+                opacity:0.7;\
             }\
-            .cardify__left{flex-grow:1;max-width:70%}\
-            .cardify__right{display:flex;align-items:center;flex-shrink:0;position:relative}\
-            .cardify .full-start-new__reactions{margin:0;margin-right:-2.8em}\
-            .cardify .full-start-new__reactions:not(.focus){margin:0}\
-            .cardify .full-start-new__reactions:not(.focus)>div:not(:first-child){display:none}\
-            .cardify .full-start-new__rate-line{margin:0;margin-left:3.5em}\
-            .cardify__background{left:0}\
-            .cardify__background.loaded:not(.dim){opacity:1}\
-            .cardify__background.nodisplay{opacity:0 !important}\
-            .cardify.nodisplay{transform:translate3d(0,50%,0);opacity:0}\
             \
-            /* === ORIGINAL TITLES === */\
+            /* === ОРИГИНАЛЬНЫЕ НАЗВАНИЯ === */\
             .cardify-original-titles{\
                 margin-bottom:1em;\
+                margin-top:0.3em;\
                 display:flex;\
                 flex-direction:column;\
-                gap:0.3em;\
+                gap:0.25em;\
             }\
             .cardify-original-titles__item{\
                 display:flex;\
                 align-items:center;\
-                gap:0.8em;\
-                font-size:1.4em;\
-                opacity:0.85;\
+                gap:0.6em;\
+                font-size:1.3em;\
+                opacity:0.8;\
             }\
             .cardify-original-titles__text{\
                 color:#fff;\
-                text-shadow:0 1px 3px rgba(0,0,0,0.5);\
             }\
             .cardify-original-titles__label{\
-                font-size:0.7em;\
-                padding:0.2em 0.5em;\
+                font-size:0.65em;\
+                padding:0.15em 0.4em;\
                 background:rgba(255,255,255,0.15);\
-                border-radius:0.3em;\
+                border-radius:0.25em;\
                 text-transform:uppercase;\
-                letter-spacing:0.05em;\
-                opacity:0.7;\
+                letter-spacing:0.03em;\
+                opacity:0.6;\
             }\
             \
-            /* === TRAILER === */\
+            /* === LAYOUT === */\
+            .cardify__left{flex-grow:1;max-width:70%}\
+            .cardify__right{display:flex;align-items:center;flex-shrink:0;position:relative;flex-direction:column;align-items:flex-end}\
+            \
+            /* === 3 РЕАКЦИИ === */\
+            .cardify .full-start-new__reactions--cardify{\
+                margin:0 0 1em 0 !important;\
+            }\
+            .cardify .full-start-new__reactions--cardify:not(.focus){\
+                margin:0 0 1em 0 !important;\
+            }\
+            /* Показываем 3 реакции вместо 1 */\
+            .cardify .full-start-new__reactions--cardify:not(.focus) > div{\
+                display:flex !important;\
+                gap:0.5em;\
+            }\
+            .cardify .full-start-new__reactions--cardify:not(.focus) .reaction:nth-child(n+4){\
+                display:none !important;\
+            }\
+            .cardify .full-start-new__reactions--cardify:not(.focus) .reaction{\
+                position:relative;\
+            }\
+            .cardify .full-start-new__reactions--cardify:not(.focus) .reaction__count{\
+                position:absolute;\
+                top:25%;\
+                left:90%;\
+                font-size:1.1em;\
+                font-weight:500;\
+            }\
+            \
+            .cardify .full-start-new__rate-line{margin:0}\
+            .cardify .full-start-new__rate-line>*:last-child{margin-right:0 !important}\
+            \
+            /* === ФОНОВОЕ ИЗОБРАЖЕНИЕ === */\
+            .cardify__background{left:0}\
+            .cardify__background.loaded:not(.dim){opacity:1}\
+            .cardify__background.nodisplay{opacity:0 !important}\
+            .cardify.nodisplay{transform:translate3d(0,50%,0);opacity:0}\
+            body:not(.menu--open) .cardify__background{mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%)}\
+            \
+            /* === ТРЕЙЛЕР === */\
             .cardify-trailer{opacity:0;transition:opacity .3s;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:#000}\
             .cardify-trailer.display{opacity:1}\
             .cardify-trailer__player{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}\
@@ -829,23 +873,24 @@
             @keyframes cardify-spin{to{transform:rotate(360deg)}}\
             .cardify-trailer__controlls{position:fixed;left:1.5em;right:1.5em;bottom:1.5em;display:flex;align-items:flex-end;transform:translateY(100%);opacity:0;transition:all .3s}\
             .cardify-trailer.display .cardify-trailer__controlls{transform:translateY(0);opacity:1}\
-            .cardify-trailer__title{flex-grow:1;padding-right:2em;font-size:2.5em;font-weight:600;color:#fff;text-shadow:0 2px 4px rgba(0,0,0,0.5)}\
+            .cardify-trailer__title{flex-grow:1;padding-right:2em;font-size:2em;font-weight:600;color:#fff;text-shadow:0 2px 4px rgba(0,0,0,0.5)}\
             .cardify-trailer__remote{display:flex;align-items:center;color:#fff}\
             .cardify-trailer__remote-icon{width:2.5em;height:2.5em}\
             .cardify-trailer__remote-icon svg{width:100%;height:100%}\
             .cardify-trailer__remote-text{margin-left:1em;font-size:1.2em}\
             \
-            /* === PREVIEW === */\
-            .cardify-preview{position:relative;border-radius:.3em;width:8em;height:5em;background:#000;overflow:hidden;margin-left:1em}\
+            /* === ПРЕВЬЮ ТРЕЙЛЕРА === */\
+            .cardify-preview{position:relative;border-radius:.4em;width:9em;height:5.5em;background:#000;overflow:hidden;margin-bottom:1em}\
             .cardify-preview>div{position:relative;width:100%;height:100%}\
             .cardify-preview__img{width:100%;height:100%;object-fit:cover}\
             .cardify-preview__loader{position:absolute;left:0;bottom:0;height:4px;background:rgba(255,255,255,0.9);width:0;transition:width .05s linear}\
+            .cardify-preview__icon{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2em;height:2em;background:rgba(0,0,0,0.5);border-radius:50%;display:flex;align-items:center;justify-content:center}\
+            .cardify-preview__icon svg{width:1.2em;height:1.2em}\
             \
-            /* === OTHER === */\
+            /* === ШАПКА === */\
             .head.nodisplay{transform:translateY(-100%)}\
-            body:not(.menu--open) .cardify__background{mask-image:linear-gradient(to bottom,white 50%,rgba(255,255,255,0) 100%)}\
             \
-            /* Скрываем старый плагин названий если есть */\
+            /* Скрываем старый плагин названий */\
             .cardify .original_title{display:none !important}\
         </style>');
         
@@ -884,31 +929,6 @@
             }
         });
 
-        function getVideo(data) {
-            if (!data.videos || !data.videos.results) return null;
-            
-            var items = data.videos.results.filter(function(v) {
-                return v.site === 'YouTube' && v.key;
-            }).map(function(v) {
-                return {
-                    title: v.name || '',
-                    id: v.key,
-                    code: v.iso_639_1,
-                    time: new Date(v.published_at).getTime()
-                };
-            });
-
-            if (!items.length) return null;
-
-            items.sort(function(a, b) { return b.time - a.time; });
-
-            var lang = Lampa.Storage.field('tmdb_lang') || 'ru';
-            var myLang = items.filter(function(v) { return v.code === lang; });
-            var enLang = items.filter(function(v) { return v.code === 'en'; });
-
-            return myLang[0] || enLang[0] || items[0];
-        }
-
         // Основной слушатель
         Lampa.Listener.follow('full', function(e) {
             if (e.type == 'complite') {
@@ -917,7 +937,21 @@
                 var render = e.object.activity.render();
                 render.find('.full-start__background').addClass('cardify__background');
 
-                // === ОРИГИНАЛЬНЫЕ НАЗВАНИЯ ===
+                // Принудительно увеличиваем логотип через JS
+                setTimeout(function() {
+                    var titleImg = render.find('.full-start-new__title img, .full-start-new__head img, .full-start__title-img');
+                    if (titleImg.length) {
+                        titleImg.css({
+                            'max-height': '10em',
+                            'min-height': '4em',
+                            'height': 'auto',
+                            'width': 'auto',
+                            'max-width': '85%'
+                        });
+                    }
+                }, 100);
+
+                // Оригинальные названия
                 if (Lampa.Storage.field('cardify_show_original_title') !== false && e.data.movie) {
                     var cardifyLeft = render.find('.cardify__left');
                     
@@ -926,23 +960,30 @@
                     });
                 }
 
-                // === ТРЕЙЛЕРЫ ===
-                if (!Lampa.Storage.field('cardify_run_trailers')) return;
-
-                var trailer = getVideo(e.data);
-
-                if (!trailer) return;
-
-                if (Lampa.Activity.active().activity === e.object.activity) {
-                    new Trailer(e.object, trailer);
-                } else {
-                    var follow = function(a) {
-                        if (a.type == 'start' && a.object.activity === e.object.activity && !e.object.activity.trailer_ready) {
-                            Lampa.Listener.remove('activity', follow);
-                            new Trailer(e.object, trailer);
-                        }
-                    };
-                    Lampa.Listener.follow('activity', follow);
+                // Трейлеры iTunes
+                if (Lampa.Storage.field('cardify_run_trailers') !== false) {
+                    var movie = e.data.movie;
+                    var isTv = !!(e.object && e.object.method && e.object.method === 'tv');
+                    
+                    if (movie) {
+                        iTunesTrailer.load(movie, isTv, function(video) {
+                            if (video && !e.object.activity.trailer_ready) {
+                                log('iTunes трейлер найден:', video.title);
+                                
+                                if (Lampa.Activity.active().activity === e.object.activity) {
+                                    new Trailer(e.object, video);
+                                } else {
+                                    var follow = function(a) {
+                                        if (a.type == 'start' && a.object.activity === e.object.activity && !e.object.activity.trailer_ready) {
+                                            Lampa.Listener.remove('activity', follow);
+                                            new Trailer(e.object, video);
+                                        }
+                                    };
+                                    Lampa.Listener.follow('activity', follow);
+                                }
+                            }
+                        });
+                    }
                 }
             }
         });
