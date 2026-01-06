@@ -143,12 +143,17 @@
         this.ready = false;
         this.playing = false;
         this.playAttempts = 0;
+        this.adErrorCount = 0;
+        this.durationLoaded = false;
+        this.userInteracted = false;
         
         log('BackgroundTrailer: создаём, videoId =', video.videoId);
         
         this.background = render.find('.full-start__background');
         
-        var embedUrl = 'https://rutube.ru/play/embed/' + video.videoId;
+        // БЕЗ autoplay в URL - будем запускать вручную после user interaction
+        var embedUrl = 'https://rutube.ru/play/embed/' + video.videoId + 
+            '?skinColor=000000&suggestionsDisabled=1';
         
         this.html = $('\
             <div class="cardify-bg-video">\
@@ -156,7 +161,7 @@
                     id="cardify-rutube-' + video.videoId.substring(0, 8) + '" \
                     src="' + embedUrl + '" \
                     frameborder="0" \
-                    allow="autoplay; encrypted-media" \
+                    allow="autoplay; encrypted-media; fullscreen; clipboard-write" \
                     allowfullscreen></iframe>\
                 <div class="cardify-bg-video__overlay"></div>\
             </div>\
@@ -165,7 +170,26 @@
         this.iframe = this.html.find('iframe')[0];
         this.background.after(this.html);
         
-        // Слушаем сообщения
+        // Отслеживаем ЛЮБОЕ взаимодействие пользователя на странице
+        this.interactionHandler = function(e) {
+            if (self.destroyed) return;
+            if (!self.userInteracted && self.ready) {
+                self.userInteracted = true;
+                log('BackgroundTrailer: user interaction detected, trying to play');
+                self.mute();
+                setTimeout(function() { self.tryPlay(); }, 50);
+                setTimeout(function() { self.tryPlay(); }, 300);
+            }
+        };
+        
+        // Lampa использует навигацию с пульта/клавиатуры, так что слушаем всё
+        document.addEventListener('click', this.interactionHandler, { capture: true });
+        document.addEventListener('keydown', this.interactionHandler, { capture: true });
+        document.addEventListener('touchstart', this.interactionHandler, { capture: true });
+        // Для Lampa - навигация по элементам
+        document.addEventListener('mouseenter', this.interactionHandler, { capture: true });
+        
+        // Слушаем сообщения от плеера
         this.messageHandler = function(e) {
             if (self.destroyed) return;
             if (!self.iframe || e.source !== self.iframe.contentWindow) return;
@@ -174,13 +198,11 @@
             try {
                 var message = JSON.parse(e.data);
                 
-                // Подробное логирование
+                // Логирование (кроме частых событий)
                 if (message.type === 'player:changeState') {
-                    log('Rutube changeState:', message.data);
-                } else if (message.type === 'player:currentTime') {
-                    // Слишком много логов - пропускаем
-                } else {
-                    log('Rutube event:', message.type, message.data ? JSON.stringify(message.data).substring(0, 100) : '');
+                    log('Rutube changeState:', message.data && message.data.state);
+                } else if (message.type !== 'player:currentTime' && message.type !== 'player:buffering') {
+                    log('Rutube event:', message.type);
                 }
                 
                 switch(message.type) {
@@ -188,108 +210,168 @@
                         log('BackgroundTrailer: READY');
                         self.ready = true;
                         
-                        // Сразу пробуем запустить
-                        self.tryPlay();
+                        // Как в оригинальном плагине - скрываем controls и мутим
+                        self.sendCommand({ type: 'player:hideControls', data: {} });
+                        self.mute();
                         
-                        // И ещё несколько попыток с задержкой
-                        setTimeout(function() { self.tryPlay(); }, 500);
-                        setTimeout(function() { self.tryPlay(); }, 1000);
-                        setTimeout(function() { self.tryPlay(); }, 2000);
+                        // Если уже было взаимодействие - пробуем запустить
+                        if (self.userInteracted) {
+                            setTimeout(function() { self.tryPlay(); }, 100);
+                        }
+                        break;
+                        
+                    case 'player:durationChange':
+                        log('BackgroundTrailer: durationChange - видео загружено');
+                        self.durationLoaded = true;
+                        
+                        // Как в оригинальном плагине - запускаем при durationChange
+                        self.mute();
+                        setTimeout(function() { self.tryPlay(); }, 100);
                         break;
                         
                     case 'player:changeState':
                         var state = message.data && message.data.state;
-                        log('BackgroundTrailer: state =', state);
                         
                         if (state === 'playing') {
                             log('BackgroundTrailer: PLAYING!');
                             self.playing = true;
-                            self.html.addClass('cardify-bg-video--visible');
-                            self.background.addClass('cardify-bg-hidden');
+                            self.showVideo();
                         } else if (state === 'paused' || state === 'pause') {
-                            log('BackgroundTrailer: PAUSED - пробуем снова запустить');
-                            if (!self.playing) {
-                                setTimeout(function() { self.tryPlay(); }, 500);
+                            if (!self.playing && self.playAttempts < 10) {
+                                // Пауза, но ещё не играли - пробуем снова
+                                setTimeout(function() { 
+                                    self.mute();
+                                    self.tryPlay(); 
+                                }, 1000);
                             }
+                        } else if (state === 'lockScreenOff') {
+                            // Как в оригинальном плагине - это тоже playing
+                            self.playing = true;
+                            self.showVideo();
                         }
                         break;
                     
                     case 'player:playStart':
                         log('BackgroundTrailer: playStart!');
                         self.playing = true;
-                        self.html.addClass('cardify-bg-video--visible');
-                        self.background.addClass('cardify-bg-hidden');
+                        self.showVideo();
                         break;
                         
                     case 'player:playComplete':
                         log('BackgroundTrailer: завершено - перезапускаем');
+                        self.playing = false;
+                        self.playAttempts = 0;
                         self.sendCommand({ type: 'player:setCurrentTime', data: { time: 0 } });
                         setTimeout(function() { self.tryPlay(); }, 100);
                         break;
                         
                     case 'player:adStart':
                         log('BackgroundTrailer: реклама началась');
-                        // Не скрываем - пусть показывается
+                        // Реклама идёт - это хорошо, показываем
+                        self.showVideo();
                         break;
                         
                     case 'player:adEnd':
                         log('BackgroundTrailer: реклама закончилась');
-                        self.html.addClass('cardify-bg-video--visible');
-                        self.background.addClass('cardify-bg-hidden');
+                        self.showVideo();
+                        // После рекламы пробуем запустить основное видео
+                        self.mute();
+                        setTimeout(function() { self.tryPlay(); }, 300);
                         break;
                         
-                    case 'player:error':
                     case 'player:adError':
-                        // Ошибки рекламы игнорируем, это нормально
-                        if (message.type === 'player:error') {
-                            log('BackgroundTrailer: ошибка плеера:', message.data);
+                        self.adErrorCount++;
+                        log('BackgroundTrailer: ошибка рекламы #' + self.adErrorCount);
+                        
+                        // После нескольких ошибок рекламы - она не загрузится
+                        // Rutube должен пропустить к видео
+                        if (self.adErrorCount >= 3 && !self.playing) {
+                            log('BackgroundTrailer: много ошибок рекламы, пробуем запустить видео');
+                            self.mute();
+                            setTimeout(function() { self.tryPlay(); }, 500);
+                            setTimeout(function() { self.tryPlay(); }, 1500);
                         }
                         break;
                         
-                    case 'player:durationChange':
-                        // Есть длительность - значит видео загружено
-                        log('BackgroundTrailer: durationChange - видео загружено');
-                        if (!self.playing) {
-                            self.tryPlay();
+                    case 'player:error':
+                        log('BackgroundTrailer: ошибка плеера:', message.data);
+                        break;
+                        
+                    case 'player:rollState':
+                        // Состояние рекламного ролика
+                        if (message.data && message.data.state === 'complete') {
+                            log('BackgroundTrailer: preroll complete');
+                            self.mute();
+                            setTimeout(function() { self.tryPlay(); }, 300);
                         }
                         break;
                 }
             } catch(err) {
-                log('BackgroundTrailer: ошибка парсинга:', err);
+                // Игнорируем не-JSON сообщения
             }
         };
         
         window.addEventListener('message', this.messageHandler);
         
         this.sendCommand = function(command) {
-            if (!this.iframe) return;
+            // Как в оригинальном плагине - проверяем ready
+            if (!this.ready || !this.iframe || !this.iframe.contentWindow) return;
             try {
-                log('BackgroundTrailer: отправляем команду:', command.type);
                 this.iframe.contentWindow.postMessage(JSON.stringify(command), '*');
-            } catch(e) {
-                log('BackgroundTrailer: ошибка отправки команды:', e);
-            }
+            } catch(e) {}
+        };
+        
+        this.mute = function() {
+            this.sendCommand({ type: 'player:mute', data: {} });
+            this.sendCommand({ type: 'player:setVolume', data: { volume: 0 } });
         };
         
         this.tryPlay = function() {
             if (this.destroyed || this.playing) return;
+            if (!this.ready) return;
+            
             this.playAttempts++;
             log('BackgroundTrailer: попытка запуска #' + this.playAttempts);
             
-            this.sendCommand({ type: 'player:play', data: {} });
-            this.sendCommand({ type: 'player:setVolume', data: { volume: 0 } });
-            this.sendCommand({ type: 'player:mute', data: {} });
+            // Сначала мутим, потом play
+            this.mute();
+            
+            var that = this;
+            setTimeout(function() {
+                that.sendCommand({ type: 'player:play', data: {} });
+            }, 50);
+        };
+        
+        this.showVideo = function() {
+            this.html.addClass('cardify-bg-video--visible');
+            this.background.addClass('cardify-bg-hidden');
         };
         
         this.destroy = function() {
             if (this.destroyed) return;
             log('BackgroundTrailer: уничтожаем');
             this.destroyed = true;
+            
             window.removeEventListener('message', this.messageHandler);
+            document.removeEventListener('click', this.interactionHandler, { capture: true });
+            document.removeEventListener('keydown', this.interactionHandler, { capture: true });
+            document.removeEventListener('touchstart', this.interactionHandler, { capture: true });
+            document.removeEventListener('mouseenter', this.interactionHandler, { capture: true });
+            
             this.background.removeClass('cardify-bg-hidden');
             this.html.remove();
             if (typeof onDestroy === 'function') onDestroy();
         };
+        
+        // Пробуем симулировать взаимодействие через небольшую задержку
+        // На некоторых платформах (Smart TV, Android TV) autoplay разрешён
+        setTimeout(function() {
+            if (!self.destroyed && self.ready && !self.playing) {
+                log('BackgroundTrailer: пробуем автозапуск');
+                self.mute();
+                self.tryPlay();
+            }
+        }, 2000);
     };
 
     // ==================== ORIGINAL TITLE ====================
