@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zapret2": {
+      "command": "npx",
+      "args": ["-y", "zapret2-mcp"]
+    }
+  }
+}
